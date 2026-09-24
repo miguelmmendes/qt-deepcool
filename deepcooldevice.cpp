@@ -1,4 +1,5 @@
 #include "deepcooldevice.h"
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -518,6 +519,81 @@ bool DeepCoolDevice::syncClock()
     }
     QByteArray resp = receiveData(64);
     return resp.size() >= 3 && static_cast<quint8>(resp[2]) == 0x0A;
+}
+
+bool DeepCoolDevice::writeControlRaw(const QByteArray &data)
+{
+    if (deviceInfo.type != DEVICE_TYPE_USB_VENDOR || !deviceHandle) {
+        return false;
+    }
+    int transferred = 0;
+    int ret = libusb_bulk_transfer(deviceHandle, 0x01,
+        (unsigned char*)data.constData(), data.size(), &transferred, 5000);
+    return ret >= 0 && transferred == data.size();
+}
+
+static bool echoes(const QByteArray &resp, quint8 command)
+{
+    return resp.size() >= 3 && static_cast<quint8>(resp[2]) == command;
+}
+
+bool DeepCoolDevice::uploadImage(const QByteArray &jpeg)
+{
+    if (!isOpen() || jpeg.isEmpty()) {
+        return false;
+    }
+
+    // 0x09 clears the stored list so the new image replaces it instead of joining a slideshow
+    if (!echoes(sendControl(0x09, QByteArray()), 0x09) ||
+        !echoes(sendControl(0x0F, QByteArray()), 0x0F)) {
+        return false;
+    }
+
+    // 64-byte DCLd header (see PROTOCOL.md "Image Upload")
+    quint16 jpegSum = 0;
+    for (char c : jpeg) {
+        jpegSum += static_cast<quint8>(c);
+    }
+    QByteArray header(64, 0);
+    header.replace(0, 4, "DCLd");
+    header[4] = 0x01;  // still image
+    for (int i = 0; i < 4; ++i) {
+        header[5 + i] = static_cast<char>((jpeg.size() >> (8 * i)) & 0xFF);
+    }
+    header[9] = static_cast<char>(jpegSum & 0xFF);
+    header[10] = static_cast<char>(jpegSum >> 8);
+    header.replace(20, 32, QCryptographicHash::hash(jpeg, QCryptographicHash::Md5).toHex());
+    quint16 headerSum = 0;
+    for (int i = 0; i < 62; ++i) {
+        headerSum += static_cast<quint8>(header[i]);
+    }
+    header[62] = static_cast<char>(headerSum & 0xFF);
+    header[63] = static_cast<char>(headerSum >> 8);
+
+    if (!writeControlRaw(header)) {
+        return false;
+    }
+    for (int offset = 0; offset < jpeg.size(); offset += 64) {
+        if (!writeControlRaw(jpeg.mid(offset, 64))) {
+            return false;
+        }
+    }
+    QByteArray finish("dcldfinish");
+    finish.resize(64, 0);
+    if (!writeControlRaw(finish)) {
+        return false;
+    }
+
+    sendControl(0x08, QByteArray(2, 0));
+    return setImageMode(true);
+}
+
+bool DeepCoolDevice::setImageMode(bool on)
+{
+    if (!isOpen()) {
+        return false;
+    }
+    return echoes(sendControl(0x03, QByteArray(1, on ? 0x02 : 0x01)), 0x03);
 }
 
 bool DeepCoolDevice::setLayout(MainScreen screen, AuxArea aux)

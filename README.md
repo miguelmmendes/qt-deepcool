@@ -14,7 +14,8 @@ Linux command-line tool for controlling DeepCool MYSTIQUE 360 AIO cooler LCD dis
 - Headless operation for servers (no GUI required)
 - Automatic device initialization after cold boot
 - Systemd service support for auto-start
-- Experimental custom image upload (`capture/mystique_image.py`), see [capture/README.md](capture/README.md)
+- Show a picture instead of stats (`--image file.png`)
+- Live control file + status file, used by the [Omarchy bar widget](omarchy-plugin/README.md)
 
 ## Supported Devices
 

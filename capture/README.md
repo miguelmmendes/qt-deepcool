@@ -37,7 +37,8 @@ program can hold the device.
 | `live_stats.py` | Prototype of the real-sensor feed that became `sensors.cpp` + `deepcool-cli` |
 | `fan_identify.sh` | `sudo`: stops one motherboard fan output at a time to identify fans (restores settings) |
 | `analysis/parse.py` | Decode a capture: control commands, `DCLd` uploads (JPEGs saved to `analysis/extracted/`) |
-| `record.sh` | Guided capture: one `.pcapng` per step via `usbmon`, with notes in `notes.txt` |
+| `record.sh` | Guided capture with fixed steps: one `.pcapng` per step via `usbmon`, notes in `notes.txt` |
+| `explore.sh` | Free-form capture: describe each setting you try, record it, and get decoded commands in `explore/<date>/notes.md` |
 | `docker-compose.yml` | Boots the existing Windows install in `~/.windows` with only the cooler passed through |
 
 ## Capturing DeepCreative traffic

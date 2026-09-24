@@ -1,0 +1,18 @@
+# User-level service for the Omarchy plugin (no root needed with 70-deepcool.rules).
+# Install: cmake --install build --prefix ~/.local
+#          cp deepcool.user.service ~/.config/systemd/user/deepcool.service
+#          systemctl --user daemon-reload && systemctl --user enable --now deepcool
+# Display settings come from ~/.config/deepcool/control.json (written by the plugin).
+[Unit]
+Description=DeepCool MYSTIQUE LCD driver
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/deepcool-cli
+Restart=on-failure
+RestartSec=5
+Environment=QT_QPA_PLATFORM=offscreen
+
+[Install]
+WantedBy=default.target

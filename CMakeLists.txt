@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Find Qt6 Core
-find_package(Qt6 REQUIRED COMPONENTS Core)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
 
 # Find udev and libusb
 find_library(UDEV_LIBRARY udev)
@@ -40,6 +40,7 @@ add_executable(deepcool-cli ${SOURCES})
 
 target_link_libraries(deepcool-cli
     Qt6::Core
+    Qt6::Gui
     ${UDEV_LIBRARY}
     ${LIBUSB_LIBRARIES}
 )

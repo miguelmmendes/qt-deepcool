@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "bulletazz.deepcool",
+  "name": "DeepCool LCD",
+  "version": "0.1.0",
+  "author": "bulletazz",
+  "license": "MIT",
+  "description": "Control the DeepCool MYSTIQUE AIO screen: switch built-in stats screens, rotate them, or show a picture.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "DeepCool LCD",
+    "description": "CPU temperature in the bar; click to control the cooler screen.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

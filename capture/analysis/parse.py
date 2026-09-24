@@ -2,7 +2,22 @@
 """Extract DeepCool Mystique control commands and image uploads from usbmon captures."""
 import subprocess, sys, hashlib, os
 
-def packets(path, dev=5):
+def find_cooler(path):
+    """USB address whose bulk packets carry the AA 2E / 55 2E protocol header."""
+    out = subprocess.run(['tshark', '-r', path, '-Y', 'usb.transfer_type==0x03 && usb.data_len>0',
+        '-T', 'fields', '-e', 'usb.device_address', '-e', 'usb.capdata'],
+        capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        addr, _, data = line.partition('\t')
+        if data.startswith(('aa2e', '552e')):
+            return int(addr)
+    return None
+
+
+def packets(path, dev=None):
+    dev = dev if dev is not None else find_cooler(path)
+    if dev is None:
+        return
     out = subprocess.run(['tshark', '-r', path, '-Y',
         f'usb.device_address=={dev} && usb.transfer_type==0x03 && usb.data_len>0',
         '-T', 'fields', '-e', 'frame.time_relative', '-e', 'usb.endpoint_address', '-e', 'usb.capdata'],

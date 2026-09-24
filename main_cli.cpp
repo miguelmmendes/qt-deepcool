@@ -32,8 +32,16 @@
 #include <QRegularExpression>
 #include <QDir>
 #include <QDebug>
+#include <QBuffer>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMap>
+#include <QSaveFile>
 
 #include <csignal>
 #include <unistd.h>
@@ -441,6 +449,96 @@ bool parseScreen(const QString& name, MainScreen& screen) {
     return true;
 }
 
+QString screenName(MainScreen screen) {
+    switch (screen) {
+        case SCREEN_CPU_FREQ: return "cpu-freq";
+        case SCREEN_CLOCK:    return "clock";
+        case SCREEN_PUMP:     return "pump";
+        case SCREEN_CPU_FAN:  return "cpu-fan";
+        case SCREEN_FANS:     return "fans";
+        case SCREEN_CPU_TEMP: return "cpu-temp";
+    }
+    return "cpu-temp";
+}
+
+static const QMap<QString, AuxArea> kAuxAreas = {
+    {"voltages", AUX_VOLTAGES}, {"system", AUX_SYSTEM}, {"core", AUX_CORE},
+};
+
+// Desired display state. Set from CLI options, then overridden live by the control file
+// (written by the Omarchy plugin):
+//   {"mode": "stats"|"image", "screens": ["cpu-temp", ...], "aux": "system",
+//    "cycle": 10, "image": "/path/to/picture.png", "rotation": 0}
+struct Control {
+    bool imageMode = false;
+    QList<MainScreen> screens = {SCREEN_CPU_TEMP};
+    AuxArea aux = AUX_SYSTEM;
+    int cycleSeconds = 10;
+    QString imagePath;
+    int rotationDeg = 0;
+
+    bool operator==(const Control& o) const {
+        return imageMode == o.imageMode && screens == o.screens && aux == o.aux &&
+               cycleSeconds == o.cycleSeconds && imagePath == o.imagePath && rotationDeg == o.rotationDeg;
+    }
+};
+
+// Merge the keys present in a control file into `control`. Unknown values are ignored.
+bool loadControlFile(const QString& path, Control& control) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QJsonParseError err;
+    QJsonObject obj = QJsonDocument::fromJson(f.readAll(), &err).object();
+    if (err.error != QJsonParseError::NoError) {
+        logError(QString("Ignoring invalid control file %1: %2").arg(path, err.errorString()));
+        return false;
+    }
+    if (obj.contains("mode")) control.imageMode = obj.value("mode").toString() == "image";
+    if (obj.contains("screens")) {
+        QList<MainScreen> screens;
+        for (const QJsonValue& v : obj.value("screens").toArray()) {
+            MainScreen s;
+            if (parseScreen(v.toString(), s)) screens.append(s);
+        }
+        if (!screens.isEmpty()) control.screens = screens;
+    }
+    QString aux = obj.value("aux").toString();
+    if (kAuxAreas.contains(aux)) control.aux = kAuxAreas.value(aux);
+    if (obj.contains("cycle")) control.cycleSeconds = qMax(1, obj.value("cycle").toInt(10));
+    if (obj.contains("image")) control.imagePath = obj.value("image").toString();
+    if (obj.contains("rotation")) control.rotationDeg = obj.value("rotation").toInt(0);
+    return true;
+}
+
+// Scale/crop an image to the 480x640 portrait panel and encode it like DeepCreative does.
+QByteArray toPanelJpeg(const QString& path) {
+    QImage img(path);
+    if (img.isNull()) return QByteArray();
+    img = img.convertToFormat(QImage::Format_RGB888)
+             .scaled(480, 640, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    img = img.copy((img.width() - 480) / 2, (img.height() - 640) / 2, 480, 640);
+    QByteArray jpeg;
+    QBuffer buffer(&jpeg);
+    buffer.open(QIODevice::WriteOnly);
+    img.save(&buffer, "JPEG", 85);
+    return jpeg;
+}
+
+QString defaultStatusPath() {
+    QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    if (runtime.isEmpty()) runtime = QString("/tmp/deepcool-%1").arg(getuid());
+    return runtime + "/deepcool/status.json";
+}
+
+void writeStatus(const QString& path, const QJsonObject& status) {
+    QDir().mkpath(QFileInfo(path).path());
+    QSaveFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(status).toJson(QJsonDocument::Compact));
+        f.commit();
+    }
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -487,6 +585,20 @@ int main(int argc, char *argv[])
         "Seconds per screen when --layout lists several", "seconds", "10");
     parser.addOption(cycleOption);
 
+    QCommandLineOption imageOption("image",
+        "Show this picture instead of stats (scaled/cropped to 480x640). Uploads write the "
+        "cooler's flash, so it is only re-uploaded when the picture changes.", "file");
+    parser.addOption(imageOption);
+
+    QCommandLineOption controlOption("control",
+        "JSON file that overrides the display settings live (used by the Omarchy plugin)",
+        "file", QDir::homePath() + "/.config/deepcool/control.json");
+    parser.addOption(controlOption);
+
+    QCommandLineOption statusOption("status",
+        "JSON file where live readings and state are written every update", "file", defaultStatusPath());
+    parser.addOption(statusOption);
+
     QCommandLineOption chipOption("sensor-chip",
         "hwmon chip for fans/voltages, e.g. nct6799 ('auto' = first Super I/O chip)", "name", "auto");
     parser.addOption(chipOption);
@@ -531,29 +643,40 @@ int main(int argc, char *argv[])
 
     g_verbose = parser.isSet(verboseOption);
 
-    // Validate screen options before touching the device
-    QList<MainScreen> screens;
+    // Validate display options before touching the device
+    Control control;
+    control.screens.clear();
     for (const QString& name : parser.value(layoutOption).split(',', Qt::SkipEmptyParts)) {
         MainScreen screen;
         if (!parseScreen(name, screen)) {
             logError(QString("Unknown layout '%1'. Use: cpu-temp, cpu-freq, pump, cpu-fan, fans, clock").arg(name));
             return 1;
         }
-        screens.append(screen);
+        control.screens.append(screen);
     }
-    if (screens.isEmpty()) {
-        screens.append(SCREEN_CPU_TEMP);
+    if (control.screens.isEmpty()) {
+        control.screens.append(SCREEN_CPU_TEMP);
     }
     QString auxName = parser.value(auxOption).toLower();
-    static const QMap<QString, AuxArea> auxAreas = {
-        {"voltages", AUX_VOLTAGES}, {"system", AUX_SYSTEM}, {"core", AUX_CORE},
-    };
-    if (!auxAreas.contains(auxName)) {
+    if (!kAuxAreas.contains(auxName)) {
         logError(QString("Unknown aux area '%1'. Use: system, core, voltages").arg(auxName));
         return 1;
     }
-    AuxArea aux = auxAreas.value(auxName);
-    int cycleSeconds = qMax(1, parser.value(cycleOption).toInt());
+    control.aux = kAuxAreas.value(auxName);
+    control.cycleSeconds = qMax(1, parser.value(cycleOption).toInt());
+    control.rotationDeg = parser.value(rotateOption).toInt();
+    if (parser.isSet(imageOption)) {
+        control.imageMode = true;
+        control.imagePath = parser.value(imageOption);
+    }
+
+    // The control file (if present) wins over command-line options
+    const QString controlPath = parser.value(controlOption);
+    const QString statusPath = parser.value(statusOption);
+    QDateTime controlMtime = QFileInfo(controlPath).lastModified();
+    if (loadControlFile(controlPath, control)) {
+        logInfo(QString("Using settings from %1").arg(controlPath));
+    }
 
     // List devices mode
     if (parser.isSet(listOption)) {
@@ -638,17 +761,16 @@ int main(int argc, char *argv[])
     bool useFahrenheit = parser.isSet(fahrenheitOption);
     DisplayMode displayMode = parseDisplayMode(parser.value(modeOption));
 
-    // Parse rotation
-    int rotateDeg = parser.value(rotateOption).toInt();
-    ScreenRotation rotation = ROTATION_0;
-    switch (rotateDeg) {
-        case 90:  rotation = ROTATION_90;  break;
-        case 180: rotation = ROTATION_180; break;
-        case 270: rotation = ROTATION_270; break;
-        default:  rotation = ROTATION_0;   break;
-    }
+    auto toRotation = [](int deg) {
+        switch (deg) {
+            case 90:  return ROTATION_90;
+            case 180: return ROTATION_180;
+            case 270: return ROTATION_270;
+            default:  return ROTATION_0;
+        }
+    };
 
-    // Set rotation before init so it's applied during initialization
+    // Set before init so the temperature source is right from the first packet
     device.setDisplayMode(displayMode);
 
     // Always initialize the device to Machine Info mode
@@ -659,32 +781,83 @@ int main(int argc, char *argv[])
         logInfo("Warning: Device init returned false, display may not update.");
     }
 
-    // Apply rotation if specified
-    if (rotateDeg != 0) {
-        if (device.setRotation(rotation)) {
-            logInfo(QString("Screen rotation set to %1°").arg(rotateDeg));
-        } else {
-            logInfo("Warning: Failed to set screen rotation.");
-        }
-    }
-
     logInfo(QString("Update interval: %1 ms").arg(interval));
     logInfo(QString("Display mode: %1").arg(parser.value(modeOption)));
     logInfo(QString("Temperature unit: %1").arg(useFahrenheit ? "Fahrenheit" : "Celsius"));
-    if (rotateDeg != 0) {
-        logInfo(QString("Rotation: %1°").arg(rotateDeg));
-    }
+    logInfo(QString("Control file: %1").arg(controlPath));
+    logInfo(QString("Status file: %1").arg(statusPath));
     logInfo("");
 
-    // Set display mode (affects which temperature drives the main display)
-    device.setDisplayMode(displayMode);
+    // Only re-upload when the encoded picture differs from what we last put in flash
+    const QString uploadedHashPath = QDir::homePath() + "/.cache/deepcool/uploaded-image.md5";
+    auto readFileText = [](const QString& path) {
+        QFile f(path);
+        return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
+    };
 
-    if (!device.setLayout(screens.first(), aux)) {
-        logInfo("Warning: Failed to set screen layout.");
-    }
-    logInfo(QString("Layout: %1 | aux: %2%3")
-        .arg(parser.value(layoutOption), auxName,
-             screens.size() > 1 ? QString(" | cycle: %1 s").arg(cycleSeconds) : QString()));
+    int screenIndex = 0;
+    QElapsedTimer screenTimer, clockTimer;
+    QString lastError;
+    bool applied = false;
+    Control current;
+
+    // Bring the device in line with `wanted`, touching only what changed
+    auto applyControl = [&](const Control& wanted) {
+        lastError.clear();
+        if (!applied || wanted.rotationDeg != current.rotationDeg) {
+            if (!device.setRotation(toRotation(wanted.rotationDeg))) {
+                lastError = "Failed to set rotation";
+            }
+        }
+        if (wanted.imageMode) {
+            QByteArray jpeg = toPanelJpeg(wanted.imagePath);
+            if (jpeg.isEmpty()) {
+                lastError = wanted.imagePath.isEmpty() ? "No image selected"
+                                                       : "Cannot read image " + wanted.imagePath;
+            } else {
+                QString hash = QCryptographicHash::hash(jpeg, QCryptographicHash::Md5).toHex();
+                if (hash != readFileText(uploadedHashPath)) {
+                    logInfo(QString("Uploading %1 (%2 KB)...").arg(wanted.imagePath).arg(jpeg.size() / 1024));
+                    if (device.uploadImage(jpeg)) {
+                        QDir().mkpath(QFileInfo(uploadedHashPath).path());
+                        QSaveFile f(uploadedHashPath);
+                        if (f.open(QIODevice::WriteOnly)) {
+                            f.write(hash.toUtf8());
+                            f.commit();
+                        }
+                    } else {
+                        lastError = "Image upload failed";
+                    }
+                } else if (!device.setImageMode(true)) {
+                    lastError = "Failed to switch to image mode";
+                }
+            }
+        } else {
+            if (applied && current.imageMode) {
+                device.setImageMode(false);
+            }
+            screenIndex = 0;
+            if (!device.setLayout(wanted.screens.first(), wanted.aux)) {
+                lastError = "Failed to set screen layout";
+            }
+        }
+        if (!lastError.isEmpty()) {
+            logError(lastError);
+        }
+        current = wanted;
+        applied = true;
+        screenTimer.restart();
+
+        QStringList names;
+        for (MainScreen s : wanted.screens) names << screenName(s);
+        logInfo(wanted.imageMode
+            ? QString("Showing image: %1").arg(wanted.imagePath)
+            : QString("Layout: %1 | aux: %2%3").arg(names.join(','), kAuxAreas.key(wanted.aux),
+                  wanted.screens.size() > 1 ? QString(" | cycle: %1 s").arg(wanted.cycleSeconds) : QString()));
+    };
+
+    applyControl(control);
+    clockTimer.start();
 
     // Motherboard sensors for fan/pump RPM and voltages
     QString sensorChip = Sensors::findChip(parser.value(chipOption));
@@ -697,11 +870,6 @@ int main(int argc, char *argv[])
 
     // Initial CPU usage read (need two samples)
     getCPUUsage();
-
-    int screenIndex = 0;
-    QElapsedTimer screenTimer, clockTimer;
-    screenTimer.start();
-    clockTimer.start();
 
     logInfo("Starting monitoring... (Press Ctrl+C to stop)\n");
 
@@ -727,10 +895,21 @@ int main(int argc, char *argv[])
         data.volt5v = Sensors::readVoltage(sensorChip, parser.value(volt5vOption));
         data.volt12v = Sensors::readVoltage(sensorChip, parser.value(volt12vOption));
 
+        // Pick up changes from the control file (written by the Omarchy plugin)
+        QDateTime mtime = QFileInfo(controlPath).lastModified();
+        if (mtime.isValid() && mtime != controlMtime) {
+            controlMtime = mtime;
+            Control wanted = current;
+            if (loadControlFile(controlPath, wanted) && !(wanted == current)) {
+                applyControl(wanted);
+            }
+        }
+
         // Rotate built-in screens
-        if (screens.size() > 1 && screenTimer.elapsed() >= cycleSeconds * 1000LL) {
-            screenIndex = (screenIndex + 1) % screens.size();
-            device.setLayout(screens[screenIndex], aux);
+        if (!current.imageMode && current.screens.size() > 1 &&
+            screenTimer.elapsed() >= current.cycleSeconds * 1000LL) {
+            screenIndex = (screenIndex + 1) % current.screens.size();
+            device.setLayout(current.screens[screenIndex], current.aux);
             screenTimer.restart();
         }
 
@@ -742,6 +921,31 @@ int main(int argc, char *argv[])
 
         // Send to device
         bool success = device.updateDisplay(data);
+
+        QJsonArray screenList;
+        for (MainScreen sc : current.screens) screenList.append(screenName(sc));
+        writeStatus(statusPath, QJsonObject{
+            {"connected", success},
+            {"updated", QDateTime::currentSecsSinceEpoch()},
+            {"error", lastError},
+            {"mode", current.imageMode ? "image" : "stats"},
+            {"screen", screenName(current.screens.value(screenIndex, SCREEN_CPU_TEMP))},
+            {"screens", screenList},
+            {"aux", kAuxAreas.key(current.aux)},
+            {"cycle", current.cycleSeconds},
+            {"image", current.imagePath},
+            {"rotation", current.rotationDeg},
+            {"cpuTemp", data.cpuTemp},
+            {"cpuUsage", data.cpuUsage},
+            {"ramUsage", data.ramUsage},
+            {"gpuTemp", data.gpuTemp},
+            {"pumpRpm", data.pumpRpm},
+            {"cpuFanRpm", data.cpuFanRpm},
+            {"volt3v3", data.volt3v3},
+            {"volt5v", data.volt5v},
+            {"volt12v", data.volt12v},
+            {"unit", useFahrenheit ? "F" : "C"},
+        });
 
         // Log status
         QString tempUnit = useFahrenheit ? "F" : "C";
@@ -766,6 +970,7 @@ int main(int argc, char *argv[])
     int result = app.exec();
 
     // Cleanup
+    writeStatus(statusPath, QJsonObject{{"connected", false}, {"updated", QDateTime::currentSecsSinceEpoch()}});
     device.close();
     logInfo("\nDevice closed. Goodbye!");
 

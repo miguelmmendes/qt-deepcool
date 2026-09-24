@@ -81,6 +81,10 @@ public:
     ScreenRotation getRotation() const { return currentRotation; }
     bool setLayout(MainScreen screen, AuxArea aux);  // Switch built-in screen (cmd 0x04)
     bool syncClock();                                // Set device clock to local time (cmd 0x0A)
+    // Replace the stored slideshow with one 480x640 baseline JPEG and show it.
+    // Stored images persist in the device's flash, so call this sparingly.
+    bool uploadImage(const QByteArray &jpeg);
+    bool setImageMode(bool on);                      // 0x03 02 (image) / 0x03 01 (stats)
 
     // Device verification
     bool verifyDevice();
@@ -109,6 +113,7 @@ private:
     // Protocol helpers
     QByteArray buildPacket(quint8 command, const QByteArray &payload);
     QByteArray sendControl(quint8 command, const QByteArray &payload);  // EP 0x01 -> reply on 0x81
+    bool writeControlRaw(const QByteArray &data);                       // raw bulk write to EP 0x01
     static QByteArray clockPayload();
     bool validateResponse(const QByteArray &response);
 
