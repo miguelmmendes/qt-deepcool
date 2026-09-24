@@ -6,15 +6,19 @@ Linux command-line tool for controlling DeepCool MYSTIQUE 360 AIO cooler LCD dis
 
 ## Features
 
-- Display real-time CPU/GPU temperature, usage, and RAM on the LCD screen
+- Drives all six built-in screens with real values: CPU temperature, CPU frequency, pump speed,
+  CPU fan speed, fan combo, and clock (set to local time)
+- Bottom area: GHz / CPU % / RAM %, CPU temp / GHz, or 3.3 / 5 / 12 V rails
+- Fan, pump and voltage readings from the motherboard sensor chip (nct67xx, it87, ...)
+- Rotate between screens on a timer
 - Headless operation for servers (no GUI required)
 - Automatic device initialization after cold boot
-- Multiple display modes: CPU focus, GPU focus, GPU temperature
 - Systemd service support for auto-start
+- Experimental custom image upload (`capture/mystique_image.py`), see [capture/README.md](capture/README.md)
 
 ## Supported Devices
 
-- DeepCool MYSTIQUE 360 (VID: 0x3633, PID: 0x0009)
+- DeepCool MYSTIQUE 240 / 360 (VID: 0x3633, PID: 0x0009)
 
 ## Requirements
 
@@ -79,6 +83,12 @@ sudo ./build/bin/deepcool-cli --mode cpu --interval 1000 -V
 | `-d, --device <path>` | Device path or index (default: 0) |
 | `-i, --interval <ms>` | Update interval in milliseconds (default: 1000) |
 | `-m, --mode <mode>` | Display mode: cpu, gpu, gpu_focus |
+| `-L, --layout <list>` | Built-in screen(s): `cpu-temp`, `cpu-freq`, `pump`, `cpu-fan`, `fans`, `clock`. A comma-separated list rotates (default: cpu-temp) |
+| `-a, --aux <area>` | Bottom area: `system` (GHz / CPU % / RAM %), `core` (CPU temp / GHz) or `voltages` (3.3 / 5 / 12 V) |
+| `-c, --cycle <sec>` | Seconds per screen when rotating (default: 10) |
+| `--sensor-chip <name>` | hwmon chip for fans/voltages, e.g. `nct6799` (default: auto) |
+| `--pump-fan`, `--cpu-fan <input>` | hwmon fan inputs for pump / CPU fan (defaults: fan2 / fan4) |
+| `--volt-3v3`, `--volt-5v`, `--volt-12v <input:scale>` | hwmon voltage inputs and divider (defaults: in3:1, in4:3, in1:6.5 — board specific, check against your BIOS) |
 | `-f, --fahrenheit` | Use Fahrenheit instead of Celsius |
 | `-V, --verbose` | Enable verbose output |
 | `-D, --daemon` | Run as daemon (fork to background) |
@@ -88,11 +98,9 @@ sudo ./build/bin/deepcool-cli --mode cpu --interval 1000 -V
 
 Install udev rules:
 ```bash
-sudo cp 99-deepcool.rules /etc/udev/rules.d/
+sudo cp 70-deepcool.rules /etc/udev/rules.d/   # uaccess: works without a plugdev group (e.g. Arch)
 sudo udevadm control --reload-rules
 sudo udevadm trigger
-sudo usermod -aG plugdev $USER
-# Log out and back in
 ```
 
 ## Systemd Service

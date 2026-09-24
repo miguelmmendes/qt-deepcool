@@ -1,0 +1,5 @@
+# DeepCool devices: grant the logged-in user access via systemd-logind (uaccess).
+# Works on distros without a plugdev group (e.g. Arch). Must sort before 73-seat-late.rules.
+SUBSYSTEM=="usb", ATTR{idVendor}=="3633", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3633", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="34d3", ATTRS{idProduct}=="1100", TAG+="uaccess"

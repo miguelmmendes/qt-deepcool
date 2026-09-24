@@ -70,60 +70,32 @@ Payload: `01 00 03 01 24`
 0x16: payload 2D 2D ("--")
 0x17: payload 2D 2D ("--")
 ```
-These may set default display labels.
+Originally assumed to set display labels. The current firmware answers all three with
+command byte `00` (unknown) and they have no visible effect.
 
-### 5. Mode Switch (0x0A)
+### 5. Clock (0x0A), on the data endpoint 0x02
 ```
-AA 2E 0A EA 07 02 02 02 27 21 00 ... 00 48 49 44 43 [checksum]
+AA 2E 0A EA 07 09 19 00 30 32 00 ... 00 48 49 44 43 [checksum]
 ```
-Payload: `EA 07 02 02 02 27 21`
+Payload: year (LE16), month, day, hour, minute, second in local time. It must go to **endpoint 0x02**:
+on 0x01 the device rejects it (replies `00`). The original capture's `EA 07 02 02 02 27 21` was just
+the capture's timestamp, not a "mode switch".
 
-This command activates Machine Info display mode.
+### 6. Status Request (0x10), data endpoint 0x02 only
+On endpoint 0x01 it is rejected with `00`. See "Status Request Command" below.
 
-### 6. Status Request (0x10)
-```
-AA 2E 10 00 00 ... 00 48 49 44 43 00 02
-```
-Response byte 5 indicates current mode:
-- `0xFF` = Machine Info mode (active)
-- `0x00` = Image/GIF mode
+The current DeepCreative startup (2026-09 capture) sends only `0x12`, `0x02 01 01 00 01 2D`, `0x03 01`,
+`0x04 <layout>`, `0x07 00 02`, `0x08 00 FF` on 0x01, then `0x0A <time>` on 0x02.
 
 ## Display Data Command (0x01)
 
 Sent on **endpoint 0x02** to update the display. This is the main command for showing system metrics.
 
 ### Packet Layout
-```
-Offset  Description              Example
-------  -----------              -------
-0-1     Header                   AA 2E
-2       Command                  01
-3       CPU Temperature (°C)     22 (34°C)
-4-5     Reserved                 00 00
-6       CPU Usage (%)            07 (7%)
-7-8     Reserved                 00 00
-9       RAM Usage (%)            04 (4%)
-10      Reserved                 00
-11      Flag                     09
-12      Flag                     03
-13      Reserved                 00
-14      GPU Temperature (°C)     24 (36°C)
-15      Flag                     05
-16      Reserved                 00
-17      Flag                     06 or 07
-18      Flag                     0C
-19      Reserved                 00
-20      Flag                     07
-21      GHz integer part         05 (5.xx GHz)
-22      Reserved                 00
-23      GHz decimal (tens)       20 (0.20)
-24-25   MHz value (little-end)   50 14 (5200 MHz)
-26      Reserved                 00
-27-28   MHz value (repeated)     50 14
-29-41   Reserved                 00 ...
-42-45   Footer                   48 49 44 43
-46-47   Checksum                 [calculated]
-```
+13 fields of 3 bytes starting at offset 3 (`[uint16 LE integer][2-digit decimal]`), then the
+`HIDC` footer and checksum. See **Machine Info Layouts and Data Fields** at the end of this
+document for the field map. (An earlier byte-by-byte table here was a partial guess: its
+"flags" and "MHz" bytes were really the voltage and fan-RPM fields.)
 
 ### Temperature-Based LED Color
 
@@ -145,12 +117,10 @@ AA 2E 10 00 00 ... 00 48 49 44 43 00 02
 
 ### Response
 ```
-55 2E 10 00 03 FF 00 ... 00 48 49 44 43 [checksum]
-         ^^ ^^ ^^
-         |  |  +-- Mode: FF=Machine Info, 00=Image
-         |  +-- Unknown (always 03?)
-         +-- Echo of command
+55 2E 10 00 00 NN 00 ... 00 48 49 44 43 [checksum]
 ```
+Only valid on the data endpoint 0x02. In the Windows captures byte 5 (`NN`) changes on every
+poll (seen 01-0x25), so it is not a mode flag as first assumed; its meaning is unknown.
 
 ## Checksum Calculation
 
@@ -181,14 +151,15 @@ send_packet(EP_0x01, build_packet(0x06, "\x01"));
 send_packet(EP_0x01, build_packet(0x15, "\x2d\x2d"));
 send_packet(EP_0x01, build_packet(0x16, "\x2d\x2d"));
 send_packet(EP_0x01, build_packet(0x17, "\x2d\x2d"));
-send_packet(EP_0x01, build_packet(0x0A, "\xea\x07\x02\x02\x02\x27\x21"));
 
-// 2. Send display data on endpoint 0x02
+// 2. Set the clock on the DATA endpoint, then stream display data
+send_packet(EP_0x02, build_packet(0x0A, local_time_payload));  // year LE16, mon, day, h, m, s
+recv_packet(EP_0x82);
 while (running) {
     send_packet(EP_0x02, build_packet(0x10, NULL));  // Status request
     recv_packet(EP_0x82);
 
-    send_packet(EP_0x02, build_display_packet(cpu_temp, cpu_usage, gpu_temp, ram_usage, cpu_mhz));
+    send_packet(EP_0x02, build_display_packet(fields));  // 13 x [u16 int][decimal]; screen blanks if this stops
     recv_packet(EP_0x82);
 
     sleep(1);
@@ -201,19 +172,20 @@ while (running) {
 |---------|----------|-------------|
 | 0x01 | 0x02 | Display data update |
 | 0x02 | 0x01 | Configuration (rotation + settings) |
-| 0x03 | 0x01 | Setup |
-| 0x04 | 0x01 | Setup |
-| 0x05 | 0x01 | Setup |
-| 0x06 | 0x01 | Setup |
-| 0x07 | 0x01 | Setup |
-| 0x08 | 0x01 | Setup |
-| 0x0A | 0x01 | Mode switch |
-| 0x0B | 0x01 | Setup |
+| 0x03 | 0x01 | Display mode: `01` stats, `02` image slideshow |
+| 0x04 | 0x01 | Stats layout: `<main> 00 00 <aux>` |
+| 0x05 | 0x01 | Setup (unknown) |
+| 0x06 | 0x01 | Setup (unknown) |
+| 0x07 | 0x01 | Slideshow interval / effect |
+| 0x08 | 0x01 | Image list select/query (`00 FF` at startup returns a count) |
+| 0x09 | 0x01 | Clear stored image list |
+| 0x0A | 0x02 | Set clock (rejected on 0x01) |
+| 0x0B | 0x01 | Setup (unknown) |
+| 0x0F | 0x01 | Begin image upload |
 | 0x10 | 0x02 | Status request |
 | 0x12 | 0x01 | Device info request |
-| 0x15 | 0x01 | Display label |
-| 0x16 | 0x01 | Display label |
-| 0x17 | 0x01 | Display label |
+| 0x14 | 0x01 | Delete all images |
+| 0x15-0x17 | 0x01 | Rejected (`00`) by current firmware |
 
 ## Screen Rotation Command (0x02)
 
@@ -252,3 +224,89 @@ rotation value (0x00-0x03). Byte 5 remains 0xFF when in Machine Info mode.
 
 - Implementation: `deepcooldevice.cpp`
 - Protocol reverse-engineered from USB captures of Windows DeepCreative software
+
+## Image Upload (reverse-engineered 2026-09-24)
+
+DeepCreative uploads images and GIFs to the LCD as **baseline JPEGs, 480x640 (portrait), 4:2:0**.
+Everything goes over **endpoint 0x01** (control replies on 0x81). Periodic 0x10/0x01 traffic on
+0x02 keeps running during uploads.
+
+### Sequence
+1. `AA 2E 0F` (no payload): begin upload. Device echoes `55 2E 0F`.
+2. For each frame, a 64-byte raw `DCLd` header, followed by the JPEG streamed raw in 64-byte chunks
+   (the last chunk is short).
+3. A 64-byte raw trailer: ASCII `dcldfinish`, zero-padded.
+4. `AA 2E 08 <a> <b>`: select/show. Observed: first image `00 00`, second image `00 01`
+   (device then alternated both every ~3 s), GIF `01 00`. Probably `<a>` = 0 still / 1 GIF, `<b>` = slot.
+
+### DCLd header (64 bytes)
+```
+Offset  Size  Description
+0-3     4     "DCLd"
+4       1     Kind: 01 = still image, 02 = GIF frame
+5-8     4     JPEG length (LE)
+9-10    2     16-bit sum of all JPEG bytes (LE)
+11-12   2     00 00
+13      1     GIF: frame count (00 for stills)
+14      1     00
+15-16   2     GIF: 0x05DC = 1500 (3 frames x 500 ms; total or per-GIF duration, unconfirmed)
+17      1     GIF: frame index (0-based)
+18-19   2     00 00
+20-51   32    ASCII hex ID (MD5-like; not MD5 of the JPEG or the source file; same for all frames of one GIF)
+52-61   10    00
+62-63   2     16-bit sum of bytes 0-61 (LE)
+```
+A GIF is sent as `DCLd`+JPEG repeated for each frame, then a single `dcldfinish`.
+
+### Other commands
+| Command | Payload | Meaning (confirmed on hardware unless noted) |
+|---|---|---|
+| `0x03` | `01` / `02` | Display mode: `01` = Machine Info (stats), `02` = image slideshow |
+| `0x09` | none | Clear the stored image list. DeepCreative "deletes one" by sending 0x09 and re-uploading the rest |
+| `0x14` | none | "Delete all" in DeepCreative (not yet tested from Linux) |
+| `0x07` | `<interval> <effect>` | Slideshow: interval 00/01/02 = 3/5/7 s (from DeepCreative capture); effect 00 = split(?), 01 = scroll, 02 = fade |
+| `0x08` | `<a> <b>` | Sent after uploads and on layout changes; exact meaning unknown |
+
+Uploads **append** to a slideshow that the device keeps across power cycles (so they are stored in flash).
+To replace what's shown with a single image: `0x09`, `0x0F`, DCLd+JPEG, `dcldfinish`, `0x08 00 00`, `0x03 02`.
+A 15 KB JPEG takes ~0.6 s end to end. Tool: `capture/mystique_image.py`.
+
+## Machine Info Layouts and Data Fields (mapped on hardware 2026-09-25)
+
+### Display data packet (cmd 0x01, EP 0x02) is 13 fields of 3 bytes
+Field `k` lives at offset `3 + 3k`: bytes `[0..1]` = 16-bit LE integer part, byte `[2]` = 2-digit decimal part.
+Fields are rendered by the firmware; labels/icons are fixed. Updating values writes no flash.
+
+| Field | Bytes | Meaning |
+|---|---|---|
+| 0 | 3-5 | CPU temperature (main CPU-temp layout; drives LED ring colour) |
+| 1 | 6-8 | CPU usage % (System Monitor aux) |
+| 2 | 9-11 | RAM usage % (System Monitor aux) |
+| 3 | 12-14 | 3.3 V (voltage aux) |
+| 4 | 15-17 | 5 V (voltage aux) |
+| 5 | 18-20 | 12 V (voltage aux) |
+| 6 | 21-23 | CPU frequency (GHz) — main layout 0 and System Monitor aux |
+| 7 | 24-26 | CPU fan RPM (likely) |
+| 8 | 27-29 | Pump / fan RPM (main layout 2) |
+| 9-12 | 30-41 | Not shown by any layout found so far |
+
+The older byte table above (GPU temp at 14, "flags") was a partial guess; this table supersedes it.
+
+### Layout select: `AA 2E 04 <main> 00 00 <aux>` (EP 0x01)
+| main | Big display | | aux | Bottom area |
+|---|---|---|---|---|
+| 0 | CPU frequency | | 0 | 3.3 V / 5 V / 12 V |
+| 1 | Clock (set via 0x0A on EP 0x02) | | 1 | System Monitor: GHz, CPU %, RAM % |
+| 2 | Fan/pump speed | | 2 | Core Data: CPU temp, GHz |
+| 3 | CPU fan | | | |
+| 4 | CPU fan + pump combo | | | |
+| 5 | CPU temperature | | | |
+
+`0x15`/`0x16`/`0x17` (label text) are answered with command byte `00` (unknown) and have no visible effect.
+**Clock:** `AA 2E 0A <year LE16> <month> <day> <hour> <minute> <second>` sent on the **data endpoint
+0x02** (reply on 0x82 echoes `0A`). Confirmed on hardware. On endpoint 0x01 the same packet is
+rejected with `00`, which is why the original init sequence never set the time. The device keeps
+the clock running itself; DeepCreative sends it once at startup.
+The display blanks if no data packets arrive for a while, so keep streaming `0x01` packets.
+`0x10` (status) is only valid on the data endpoint 0x02; on 0x01 it is answered with `00`.
+The CPU-temp screen shows whole degrees (the decimal byte is ignored).

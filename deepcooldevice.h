@@ -23,13 +23,34 @@ enum ScreenRotation {
 };
 
 
+// Built-in firmware screens, selected with command 0x04 (see PROTOCOL.md)
+enum MainScreen {
+    SCREEN_CPU_FREQ = 0,    // CPU frequency (GHz)
+    SCREEN_CLOCK    = 1,    // Clock, set with syncClock()
+    SCREEN_PUMP     = 2,    // Pump speed (RPM)
+    SCREEN_CPU_FAN  = 3,    // CPU / radiator fan speed (RPM)
+    SCREEN_FANS     = 4,    // CPU fan + pump combined
+    SCREEN_CPU_TEMP = 5     // CPU temperature (also drives the LED ring colour)
+};
+enum AuxArea {
+    AUX_VOLTAGES = 0,       // 3.3 V / 5 V / 12 V
+    AUX_SYSTEM   = 1,       // GHz / CPU % / RAM %
+    AUX_CORE     = 2        // "Core Data": CPU temp / GHz
+};
+
 struct SystemData {
-    float cpuTemp;
-    float cpuUsage;
-    float gpuTemp;
-    float gpuUsage;
-    float ramUsage;
-    bool useFahrenheit;
+    float cpuTemp = 0;
+    float cpuUsage = 0;
+    float gpuTemp = 0;
+    float gpuUsage = 0;
+    float ramUsage = 0;
+    bool useFahrenheit = false;
+    float cpuFreqGhz = 0;   // 0 = read max scaling_cur_freq from sysfs
+    float cpuFanRpm = 0;
+    float pumpRpm = 0;
+    float volt3v3 = 0;
+    float volt5v = 0;
+    float volt12v = 0;
 };
 
 class DeepCoolDevice : public Device
@@ -58,6 +79,8 @@ public:
     bool updateDisplay(const SystemData &data);
     bool setRotation(ScreenRotation rotation);
     ScreenRotation getRotation() const { return currentRotation; }
+    bool setLayout(MainScreen screen, AuxArea aux);  // Switch built-in screen (cmd 0x04)
+    bool syncClock();                                // Set device clock to local time (cmd 0x0A)
 
     // Device verification
     bool verifyDevice();
@@ -80,9 +103,13 @@ private:
     QString deviceName;
     DisplayMode currentMode;
     ScreenRotation currentRotation;
+    MainScreen currentScreen;
+    AuxArea currentAux;
 
     // Protocol helpers
     QByteArray buildPacket(quint8 command, const QByteArray &payload);
+    QByteArray sendControl(quint8 command, const QByteArray &payload);  // EP 0x01 -> reply on 0x81
+    static QByteArray clockPayload();
     bool validateResponse(const QByteArray &response);
 
     // Command bytes (reverse-engineered from USB capture)

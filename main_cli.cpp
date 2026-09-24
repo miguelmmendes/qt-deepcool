@@ -11,6 +11,12 @@
  *   -d, --device <path>  Device path (e.g., /dev/hidraw0) or index (0, 1, ...)
  *   -i, --interval <ms>  Update interval in milliseconds (default: 1000)
  *   -m, --mode <mode>    Display mode: cpu, gpu, gpu_focus (default: cpu)
+ *   -L, --layout <list>  Built-in screen(s): cpu-temp, cpu-freq, pump, cpu-fan, fans, clock
+ *                        (comma-separated list rotates, see --cycle; default: cpu-temp)
+ *   -a, --aux <area>     Bottom area: system (GHz/CPU/RAM), core (temp/GHz) or voltages (default: system)
+ *   -c, --cycle <sec>    Seconds per screen when --layout lists several (default: 10)
+ *   --pump-fan, --cpu-fan, --volt-3v3, --volt-5v, --volt-12v, --sensor-chip
+ *                        Motherboard sensor mapping (see --help)
  *   -f, --fahrenheit     Use Fahrenheit instead of Celsius
  *   -V, --verbose        Enable verbose output
  *   -D, --daemon         Run as daemon (fork to background)
@@ -26,6 +32,8 @@
 #include <QRegularExpression>
 #include <QDir>
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QMap>
 
 #include <csignal>
 #include <unistd.h>
@@ -38,6 +46,7 @@
 
 #include "device.h"
 #include "deepcooldevice.h"
+#include "sensors.h"
 
 // Global pointers for signal handler cleanup
 static DeepCoolDevice* g_device = nullptr;
@@ -421,6 +430,17 @@ DisplayMode parseDisplayMode(const QString& mode) {
     return MODE_CPU_INFO;
 }
 
+bool parseScreen(const QString& name, MainScreen& screen) {
+    static const QMap<QString, MainScreen> screens = {
+        {"cpu-freq", SCREEN_CPU_FREQ}, {"clock", SCREEN_CLOCK}, {"pump", SCREEN_PUMP},
+        {"cpu-fan", SCREEN_CPU_FAN}, {"fans", SCREEN_FANS}, {"cpu-temp", SCREEN_CPU_TEMP},
+    };
+    auto it = screens.find(name.trimmed().toLower());
+    if (it == screens.end()) return false;
+    screen = it.value();
+    return true;
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -453,6 +473,44 @@ int main(int argc, char *argv[])
         "Display mode: cpu, gpu, gpu_focus", "mode", "cpu");
     parser.addOption(modeOption);
 
+    QCommandLineOption layoutOption(QStringList() << "L" << "layout",
+        "Built-in screen(s): cpu-temp, cpu-freq, pump, cpu-fan, fans, clock. "
+        "A comma-separated list rotates every --cycle seconds.", "screens", "cpu-temp");
+    parser.addOption(layoutOption);
+
+    QCommandLineOption auxOption(QStringList() << "a" << "aux",
+        "Bottom area: system (GHz / CPU % / RAM %), core (CPU temp / GHz) or voltages (3.3 / 5 / 12 V)",
+        "area", "system");
+    parser.addOption(auxOption);
+
+    QCommandLineOption cycleOption(QStringList() << "c" << "cycle",
+        "Seconds per screen when --layout lists several", "seconds", "10");
+    parser.addOption(cycleOption);
+
+    QCommandLineOption chipOption("sensor-chip",
+        "hwmon chip for fans/voltages, e.g. nct6799 ('auto' = first Super I/O chip)", "name", "auto");
+    parser.addOption(chipOption);
+
+    QCommandLineOption pumpFanOption("pump-fan",
+        "hwmon fan input shown as pump speed ('none' to disable)", "input", "fan2");
+    parser.addOption(pumpFanOption);
+
+    QCommandLineOption cpuFanOption("cpu-fan",
+        "hwmon fan input shown as CPU fan speed ('none' to disable)", "input", "fan4");
+    parser.addOption(cpuFanOption);
+
+    QCommandLineOption volt3v3Option("volt-3v3",
+        "hwmon input and divider for the 3.3 V reading", "input:scale", "in3:1");
+    parser.addOption(volt3v3Option);
+
+    QCommandLineOption volt5vOption("volt-5v",
+        "hwmon input and divider for the 5 V reading", "input:scale", "in4:3");
+    parser.addOption(volt5vOption);
+
+    QCommandLineOption volt12vOption("volt-12v",
+        "hwmon input and divider for the 12 V reading", "input:scale", "in1:6.5");
+    parser.addOption(volt12vOption);
+
     QCommandLineOption fahrenheitOption(QStringList() << "f" << "fahrenheit",
         "Use Fahrenheit instead of Celsius");
     parser.addOption(fahrenheitOption);
@@ -472,6 +530,30 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     g_verbose = parser.isSet(verboseOption);
+
+    // Validate screen options before touching the device
+    QList<MainScreen> screens;
+    for (const QString& name : parser.value(layoutOption).split(',', Qt::SkipEmptyParts)) {
+        MainScreen screen;
+        if (!parseScreen(name, screen)) {
+            logError(QString("Unknown layout '%1'. Use: cpu-temp, cpu-freq, pump, cpu-fan, fans, clock").arg(name));
+            return 1;
+        }
+        screens.append(screen);
+    }
+    if (screens.isEmpty()) {
+        screens.append(SCREEN_CPU_TEMP);
+    }
+    QString auxName = parser.value(auxOption).toLower();
+    static const QMap<QString, AuxArea> auxAreas = {
+        {"voltages", AUX_VOLTAGES}, {"system", AUX_SYSTEM}, {"core", AUX_CORE},
+    };
+    if (!auxAreas.contains(auxName)) {
+        logError(QString("Unknown aux area '%1'. Use: system, core, voltages").arg(auxName));
+        return 1;
+    }
+    AuxArea aux = auxAreas.value(auxName);
+    int cycleSeconds = qMax(1, parser.value(cycleOption).toInt());
 
     // List devices mode
     if (parser.isSet(listOption)) {
@@ -594,11 +676,32 @@ int main(int argc, char *argv[])
     }
     logInfo("");
 
-    // Set display mode (affects what's shown in GHz position)
+    // Set display mode (affects which temperature drives the main display)
     device.setDisplayMode(displayMode);
+
+    if (!device.setLayout(screens.first(), aux)) {
+        logInfo("Warning: Failed to set screen layout.");
+    }
+    logInfo(QString("Layout: %1 | aux: %2%3")
+        .arg(parser.value(layoutOption), auxName,
+             screens.size() > 1 ? QString(" | cycle: %1 s").arg(cycleSeconds) : QString()));
+
+    // Motherboard sensors for fan/pump RPM and voltages
+    QString sensorChip = Sensors::findChip(parser.value(chipOption));
+    if (sensorChip.isEmpty()) {
+        logInfo("Warning: No motherboard sensor chip found; fan speeds and voltages will show 0.");
+    } else {
+        logInfo(QString("Sensor chip: %1 (pump=%2, cpu fan=%3)")
+            .arg(sensorChip, parser.value(pumpFanOption), parser.value(cpuFanOption)));
+    }
 
     // Initial CPU usage read (need two samples)
     getCPUUsage();
+
+    int screenIndex = 0;
+    QElapsedTimer screenTimer, clockTimer;
+    screenTimer.start();
+    clockTimer.start();
 
     logInfo("Starting monitoring... (Press Ctrl+C to stop)\n");
 
@@ -618,18 +721,42 @@ int main(int argc, char *argv[])
         data.gpuUsage = getGPUUsage();
         data.ramUsage = getRAMUsage();
         data.useFahrenheit = useFahrenheit;
+        data.pumpRpm = Sensors::readRaw(sensorChip, parser.value(pumpFanOption));
+        data.cpuFanRpm = Sensors::readRaw(sensorChip, parser.value(cpuFanOption));
+        data.volt3v3 = Sensors::readVoltage(sensorChip, parser.value(volt3v3Option));
+        data.volt5v = Sensors::readVoltage(sensorChip, parser.value(volt5vOption));
+        data.volt12v = Sensors::readVoltage(sensorChip, parser.value(volt12vOption));
+
+        // Rotate built-in screens
+        if (screens.size() > 1 && screenTimer.elapsed() >= cycleSeconds * 1000LL) {
+            screenIndex = (screenIndex + 1) % screens.size();
+            device.setLayout(screens[screenIndex], aux);
+            screenTimer.restart();
+        }
+
+        // Keep the device clock from drifting (and follow DST changes)
+        if (clockTimer.elapsed() >= 3600 * 1000LL) {
+            device.syncClock();
+            clockTimer.restart();
+        }
 
         // Send to device
         bool success = device.updateDisplay(data);
 
         // Log status
         QString tempUnit = useFahrenheit ? "F" : "C";
-        log(QString("CPU: %1%2 (%3%) | GPU: %4%5 (%6%) | RAM: %7% | %8")
+        log(QString("CPU: %1%2 (%3%) | GPU: %4%5 (%6%) | RAM: %7% | pump %8 rpm | fan %9 rpm | "
+                    "%10/%11/%12 V | %13")
             .arg(data.cpuTemp, 0, 'f', 1).arg(tempUnit)
             .arg(data.cpuUsage, 0, 'f', 1)
             .arg(data.gpuTemp, 0, 'f', 1).arg(tempUnit)
             .arg(data.gpuUsage, 0, 'f', 1)
             .arg(data.ramUsage, 0, 'f', 1)
+            .arg(data.pumpRpm, 0, 'f', 0)
+            .arg(data.cpuFanRpm, 0, 'f', 0)
+            .arg(data.volt3v3, 0, 'f', 2)
+            .arg(data.volt5v, 0, 'f', 2)
+            .arg(data.volt12v, 0, 'f', 2)
             .arg(success ? "OK" : "FAIL"));
     });
 

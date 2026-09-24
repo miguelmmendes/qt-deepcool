@@ -1,0 +1,12 @@
+blue_image: The images are now alternating between red and blue every 3 seconds
+gif: it is running the gif
+back_to_info: no data is actually shown on the screen. all at zero
+delete_one: deleted one but image that was added by you is not showing in the deep creative
+delete_all: all images were removed
+slideshow_settings: I switched between 3,5 and 7 seconds on current fade in mode. Chose split display mode, scroll mode and back to fade in/out mode
+upload_after_clear: The app bugged out and was not leting me open explorer
+stats_mode_a: We are in monitor mode. The CPU frequency mode is selected and showing a value that fluctuates between 0.50 and 0.52
+stats_mode_b: This is time mode showing 06:28 as time and voltages in the bottom all at 0
+stats_mode_c: This was pump speed with 0 RPM reported then I changed the auxiliary display area to System Monitor and it is showing 0.55 for CPU frequency, 3% for CPU usage and 30% RAM usage
+app_startup: It checked for updates, it opened then prompted error. I selected devices then Mystique. its in CPU frequency mode
+clock_mode: It is showing time 12:50am with Core Data as auxiliary display area. Showing CPU temp at 0 and Ghz at 0.52

@@ -4,3 +4,5 @@ CMakeLists.txt.user
 
 devicedetector.cpp
 devicedetector.h
+__pycache__/
+capture/analysis/extracted/

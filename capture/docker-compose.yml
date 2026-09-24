@@ -1,0 +1,28 @@
+# One-off VM for capturing DeepCreative USB traffic.
+# Boots the existing Windows install in ~/.windows with only the cooler passed through (no GPU).
+services:
+  windows:
+    image: dockurr/windows
+    container_name: deepcool-capture-windows
+    environment:
+      VERSION: "11"
+      TZ: "Europe/Brussels"
+      RAM_SIZE: "8G"
+      CPU_CORES: "4"
+      DISK_SIZE: "128G"
+      ARGUMENTS: "-device usb-host,bus=xhci.0,vendorid=0x3633,productid=0x0009"
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+      - /dev/bus/usb
+    cap_add:
+      - NET_ADMIN
+    privileged: true
+    ports:
+      - 127.0.0.1:8006:8006
+      - 127.0.0.1:3389:3389/tcp
+    volumes:
+      - /home/bulletazz/.windows:/storage
+      - /home/bulletazz/Windows:/shared
+    restart: "no"
+    stop_grace_period: 2m

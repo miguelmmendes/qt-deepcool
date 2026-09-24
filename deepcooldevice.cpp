@@ -1,4 +1,5 @@
 #include "deepcooldevice.h"
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
@@ -19,6 +20,8 @@ DeepCoolDevice::DeepCoolDevice()
     , fd(-1)
     , currentMode(MODE_CPU_INFO)
     , currentRotation(ROTATION_0)
+    , currentScreen(SCREEN_CPU_TEMP)
+    , currentAux(AUX_SYSTEM)
 {
     libusb_init(&usbContext);
 }
@@ -371,8 +374,15 @@ bool DeepCoolDevice::initMachineInfoMode()
 
     // 3-9. Setup commands
     qDebug() << "  Cmd 0x03-0x06...";
-    sendInitPacket(0x03, QByteArray::fromHex("01"));
-    sendInitPacket(0x04, QByteArray::fromHex("05000001"));
+    sendInitPacket(0x03, QByteArray::fromHex("01"));  // Machine Info (stats) mode
+    QByteArray layoutResp;
+    {
+        // Layout: <main screen> 00 00 <aux area>
+        QByteArray layoutPayload(4, 0);
+        layoutPayload[0] = static_cast<char>(currentScreen);
+        layoutPayload[3] = static_cast<char>(currentAux);
+        layoutResp = sendInitPacket(0x04, layoutPayload);
+    }
     sendInitPacket(0x07, QByteArray::fromHex("0002"));
     sendInitPacket(0x08, QByteArray::fromHex("0004"));
     sendInitPacket(0x05, QByteArray::fromHex("0101"));
@@ -387,29 +397,23 @@ bool DeepCoolDevice::initMachineInfoMode()
     sendInitPacket(0x17, QByteArray::fromHex("2d2d"));
     usleep(10000);
 
-    // 13. Command 0x0A - Mode switch!
-    qDebug() << "  Cmd 0x0A (mode)...";
-    resp = sendInitPacket(0x0A, QByteArray::fromHex("ea07020202272100"));
-    qDebug() << "    Resp:" << resp.left(10).toHex();
-    usleep(100000);
+    // 13. Clock (0x0A) goes on the data endpoint; on 0x01 the device rejects it
+    qDebug() << "  Cmd 0x0A (clock)...";
+    syncClock();
 
-    // 14. Status check
-    qDebug() << "  Cmd 0x10 (status)...";
-    resp = sendInitPacket(0x10, QByteArray());
-    qDebug() << "    Status:" << resp.left(10).toHex();
-
-    if (resp.size() >= 6 && static_cast<quint8>(resp[5]) == 0xFF) {
-        qDebug() << "  SUCCESS!";
-        return true;
-    }
-
-    return false;
+    // The device echoes the command byte on success (0x00 = rejected).
+    // Status (0x10) is only valid on the data endpoint, so check the layout ack instead.
+    return layoutResp.size() >= 3 && static_cast<quint8>(layoutResp[0]) == 0x55 &&
+           static_cast<quint8>(layoutResp[2]) == 0x04;
 }
 
 bool DeepCoolDevice::setDisplayMode(DisplayMode mode)
 {
+    if (currentMode == mode)
+        return true;
     currentMode = mode;
-    return true;
+    // Re-run the init sequence so the device picks up the new mode payload
+    return initMachineInfoMode();
 }
 
 bool DeepCoolDevice::setRotation(ScreenRotation rotation)
@@ -461,6 +465,78 @@ bool DeepCoolDevice::setRotation(ScreenRotation rotation)
     return true;
 }
 
+QByteArray DeepCoolDevice::sendControl(quint8 command, const QByteArray &payload)
+{
+    QByteArray packet = buildPacket(command, payload);
+
+    if (deviceInfo.type == DEVICE_TYPE_USB_VENDOR && deviceHandle) {
+        int transferred = 0;
+        int ret = libusb_bulk_transfer(deviceHandle, 0x01,
+            (unsigned char*)packet.data(), packet.size(), &transferred, 1000);
+        if (ret < 0) {
+            qDebug() << "sendControl" << Qt::hex << command << "failed:" << libusb_error_name(ret);
+            return QByteArray();
+        }
+        QByteArray response(64, 0);
+        ret = libusb_bulk_transfer(deviceHandle, 0x81,
+            (unsigned char*)response.data(), 64, &transferred, 1000);
+        if (ret < 0) {
+            return QByteArray();
+        }
+        response.resize(transferred);
+        return response;
+    }
+    if (deviceInfo.type == DEVICE_TYPE_HID && sendData(packet)) {
+        return receiveData(64);
+    }
+    return QByteArray();
+}
+
+QByteArray DeepCoolDevice::clockPayload()
+{
+    // year (LE16), month, day, hour, minute, second
+    QDateTime now = QDateTime::currentDateTime();
+    QByteArray payload(7, 0);
+    payload[0] = static_cast<char>(now.date().year() & 0xFF);
+    payload[1] = static_cast<char>((now.date().year() >> 8) & 0xFF);
+    payload[2] = static_cast<char>(now.date().month());
+    payload[3] = static_cast<char>(now.date().day());
+    payload[4] = static_cast<char>(now.time().hour());
+    payload[5] = static_cast<char>(now.time().minute());
+    payload[6] = static_cast<char>(now.time().second());
+    return payload;
+}
+
+bool DeepCoolDevice::syncClock()
+{
+    if (!isOpen()) {
+        return false;
+    }
+    // Sent on the data endpoint (0x02), like display updates; the device echoes 0x0A
+    if (!sendData(buildPacket(0x0A, clockPayload()))) {
+        return false;
+    }
+    QByteArray resp = receiveData(64);
+    return resp.size() >= 3 && static_cast<quint8>(resp[2]) == 0x0A;
+}
+
+bool DeepCoolDevice::setLayout(MainScreen screen, AuxArea aux)
+{
+    if (!isOpen()) {
+        return false;
+    }
+    QByteArray payload(4, 0);
+    payload[0] = static_cast<char>(screen);
+    payload[3] = static_cast<char>(aux);
+    QByteArray resp = sendControl(0x04, payload);
+    if (resp.size() < 3 || static_cast<quint8>(resp[2]) != 0x04) {
+        return false;
+    }
+    currentScreen = screen;
+    currentAux = aux;
+    return true;
+}
+
 bool DeepCoolDevice::updateDisplay(const SystemData &data)
 {
     if (!isOpen()) {
@@ -488,95 +564,54 @@ bool DeepCoolDevice::updateDisplay(const SystemData &data)
     }
     receiveData(48);
 
-    // Get CPU frequency (max across all cores)
-    quint16 cpuMhz = 0;
-    QDir cpuDir("/sys/devices/system/cpu");
-    QStringList cpus = cpuDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QString& cpu : cpus) {
-        if (!cpu.startsWith("cpu") || cpu.length() < 4 || !cpu[3].isDigit()) {
-            continue;
-        }
-        QString freqPath = QString("/sys/devices/system/cpu/%1/cpufreq/scaling_cur_freq").arg(cpu);
-        QFile cpuFreqFile(freqPath);
-        if (cpuFreqFile.open(QIODevice::ReadOnly)) {
-            QString freqStr = QTextStream(&cpuFreqFile).readAll().trimmed();
-            quint32 freqKhz = freqStr.toUInt();
-            quint16 freq = static_cast<quint16>(freqKhz / 1000);
-            cpuFreqFile.close();
-            if (freq > cpuMhz) {
-                cpuMhz = freq;
+    // CPU frequency: caller-supplied, else max scaling_cur_freq across cores
+    float ghz = data.cpuFreqGhz;
+    if (ghz <= 0) {
+        quint32 maxKhz = 0;
+        QDir cpuDir("/sys/devices/system/cpu");
+        const QStringList cpus = cpuDir.entryList(QStringList() << "cpu[0-9]*", QDir::Dirs);
+        for (const QString& cpu : cpus) {
+            QFile f(QString("/sys/devices/system/cpu/%1/cpufreq/scaling_cur_freq").arg(cpu));
+            if (f.open(QIODevice::ReadOnly)) {
+                maxKhz = qMax(maxKhz, QTextStream(&f).readAll().trimmed().toUInt());
             }
         }
-    }
-    if (cpuMhz == 0) {
-        cpuMhz = 3500;
+        ghz = maxKhz / 1e6f;
     }
 
-    // Get sensor values
-    quint8 cpuTemp = static_cast<quint8>(qBound(0.0f, data.cpuTemp, 127.0f));
-    quint8 cpuUsage = static_cast<quint8>(qBound(0.0f, data.cpuUsage, 100.0f));
-    quint8 gpuTemp = static_cast<quint8>(qBound(0.0f, data.gpuTemp, 127.0f));
+    // GPU_FOCUS puts GPU temp in the CPU-temp slot (main display + LED colour)
+    float mainTemp = (currentMode == MODE_GPU_FOCUS) ? data.gpuTemp : data.cpuTemp;
 
-    // In GPU_FOCUS mode, swap CPU and GPU temps
-    quint8 mainTemp = cpuTemp;
-    quint8 bottomTemp = gpuTemp;
+    // Display packet: 13 fields of 3 bytes from offset 3, each
+    // [uint16 LE integer part][2-digit decimal part]. See PROTOCOL.md.
+    const float fields[] = {
+        mainTemp,         // 0: CPU temp (CPU-temp screen, LED colour)
+        data.cpuUsage,    // 1: CPU %    (System Monitor)
+        data.ramUsage,    // 2: RAM %    (System Monitor)
+        data.volt3v3,     // 3: 3.3 V
+        data.volt5v,      // 4: 5 V
+        data.volt12v,     // 5: 12 V
+        ghz,              // 6: CPU GHz  (frequency screen, System Monitor)
+        data.cpuFanRpm,   // 7: CPU fan RPM
+        data.pumpRpm,     // 8: pump RPM
+    };
 
-    if (currentMode == MODE_GPU_FOCUS) {
-        mainTemp = gpuTemp;
-        bottomTemp = cpuTemp;
-    }
-
-    // RAM usage (rounded)
-    float ramBounded = qBound(0.0f, data.ramUsage, 100.0f);
-    quint8 memUsage = static_cast<quint8>(qRound(ramBounded));
-
-    // Bottom display value
-    quint8 displayInteger = 0;
-    quint16 displayDecimal = 0;
-
-    if (currentMode == MODE_GPU_INFO) {
-        displayInteger = gpuTemp;
-        displayDecimal = 0;
-    } else if (currentMode == MODE_GPU_FOCUS) {
-        displayInteger = bottomTemp;
-        displayDecimal = 0;
-    } else {
-        float ghz = cpuMhz / 1000.0f;
-        displayInteger = static_cast<quint8>(ghz);
-        displayDecimal = static_cast<quint16>((ghz - displayInteger) * 100) * 100;
-    }
-
-    // Calculate helper bytes
-    quint8 byte9 = memUsage;
-    quint8 byte11 = (gpuTemp < 35) ? 0x05 : ((gpuTemp < 38) ? 0x06 : 0x09);
-    quint8 byte17 = 0x06;
-    quint8 byte23 = 0;
-    if (currentMode != MODE_GPU_INFO && currentMode != MODE_GPU_FOCUS) {
-        byte23 = static_cast<quint8>((cpuMhz % 1000) / 10);
-        if (byte23 < 10) byte23 = 0x0a;
-    }
-
-    // Build display packet
     QByteArray displayPacket(48, 0);
     displayPacket[0] = static_cast<char>(0xAA);
     displayPacket[1] = 0x2E;
     displayPacket[2] = 0x01;
-    displayPacket[3] = mainTemp;
-    displayPacket[6] = cpuUsage;
-    displayPacket[9] = byte9;
-    displayPacket[11] = byte11;
-    displayPacket[12] = 0x03;
-    displayPacket[14] = gpuTemp;
-    displayPacket[15] = 0x05;
-    displayPacket[17] = byte17;
-    displayPacket[18] = 0x0c;
-    displayPacket[20] = 0x07;
-    displayPacket[21] = displayInteger;
-    displayPacket[23] = byte23;
-    displayPacket[24] = static_cast<char>(displayDecimal & 0xFF);
-    displayPacket[25] = static_cast<char>((displayDecimal >> 8) & 0xFF);
-    displayPacket[27] = static_cast<char>(displayDecimal & 0xFF);
-    displayPacket[28] = static_cast<char>((displayDecimal >> 8) & 0xFF);
+    for (int k = 0; k < int(sizeof(fields) / sizeof(fields[0])); ++k) {
+        float value = qBound(0.0f, fields[k], 65535.99f);
+        quint16 whole = static_cast<quint16>(value);
+        int decimal = qRound((value - whole) * 100.0f);
+        if (decimal >= 100) {   // e.g. 4.999 rounds up to 5.00
+            decimal = 0;
+            whole = static_cast<quint16>(qMin(whole + 1, 65535));
+        }
+        displayPacket[3 + 3 * k]     = static_cast<char>(whole & 0xFF);
+        displayPacket[3 + 3 * k + 1] = static_cast<char>(whole >> 8);
+        displayPacket[3 + 3 * k + 2] = static_cast<char>(decimal);
+    }
     displayPacket[42] = 0x48;
     displayPacket[43] = 0x49;
     displayPacket[44] = 0x44;
