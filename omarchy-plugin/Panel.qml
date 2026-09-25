@@ -11,6 +11,7 @@ import qs.Ui
 Panel {
   id: root
   moduleName: "bulletazz.deepcool"
+  ipcTarget: "bulletazz.deepcool"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -35,6 +36,10 @@ Panel {
     "system": "GHz / CPU % / RAM %", "core": "CPU temp / GHz", "voltages": "3.3 V / 5 V / 12 V"
   })
   readonly property var rotations: ["0°", "90°", "180°", "270°"]
+  readonly property var modeLabels: ({ "stats": "Stats", "image": "Picture", "history": "History" })
+  readonly property var ledLabels: ({ "temperature": "Temperature", "motherboard": "Motherboard", "picture": "Picture edge" })
+  readonly property var idleLabels: ({ "off": "Screen off", "animation": "Animation" })
+  readonly property var swatches: ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#ff2d92", "#ffffff"]
 
   property var status: ({})
   property var ctl: null        // desired settings; seeded from the status file, then local
@@ -46,7 +51,11 @@ Panel {
     aux: status.aux || "system",
     cycle: status.cycle || 10,
     image: status.image || "",
-    rotation: status.rotation || 0
+    rotation: status.rotation || 0,
+    brightness: status.brightness !== undefined ? status.brightness : 50,
+    led: status.led || "temperature",
+    ledColor: status.ledColor || "",
+    idle: status.idle || "animation"
   }
   readonly property bool rotating: settingsNow.screens.length > 1
   readonly property string barLabel: serviceUp ? "󰈐 " + Math.round(status.cpuTemp || 0) + "°" : "󰈐"
@@ -127,6 +136,27 @@ Panel {
     }
   }
 
+  Process {
+    id: pickColorProc
+    command: ["zenity", "--color-selection", "--title=LED ring colour"]
+    stdout: StdioCollector {
+      id: colorStdout
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      // zenity prints rgb(r,g,b) or #rrggbb
+      var out = String(colorStdout.text || "").trim()
+      var m = out.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
+      if (m) out = "#" + [m[1], m[2], m[3]].map(function(v) { return ("0" + Number(v).toString(16)).slice(-2) }).join("")
+      if (exitCode === 0 && /^#[0-9a-fA-F]{6}$/.test(out)) root.setLedColor(out)
+    }
+  }
+
+  // Ring colour comes from the picture's edge, so a colour means: picture mode + a painted border
+  function setLedColor(color) {
+    root.apply({ led: "picture", ledColor: color, mode: "image" })
+  }
+
   Component.onCompleted: ensureDirProc.running = true
 
   implicitWidth: button.implicitWidth
@@ -152,7 +182,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(620))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(760))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -178,7 +208,7 @@ Panel {
             width: parent.width
             title: "DeepCool MYSTIQUE"
             meta: root.serviceUp
-              ? (root.settingsNow.mode === "image" ? "Showing a picture" : "Showing live stats")
+              ? ({ "image": "Showing a picture", "history": "Showing history graphs" }[root.settingsNow.mode] || "Showing live stats")
               : "Service not running"
             foreground: root.foreground
             fontFamily: root.fontFamily
@@ -238,15 +268,26 @@ Panel {
 
           PanelSectionHeader { text: "Mode"; foreground: root.foreground; fontFamily: root.fontFamily }
           ButtonGroup {
-            options: ["Stats", "Picture"]
-            value: root.settingsNow.mode === "image" ? "Picture" : "Stats"
+            options: ["Stats", "Picture", "History"]
+            value: root.modeLabels[root.settingsNow.mode] || "Stats"
             foreground: root.foreground
             fontFamily: root.fontFamily
             onChanged: function(v) {
-              if (v === "Stats") root.apply({ mode: "stats" })
-              else if (root.settingsNow.image) root.apply({ mode: "image" })
-              else pickImageProc.running = true
+              var mode = root.idFor(v, root.modeLabels)
+              if (mode === "image" && !root.settingsNow.image && !root.settingsNow.ledColor)
+                pickImageProc.running = true
+              else
+                root.apply({ mode: mode })
             }
+          }
+          Text {
+            visible: root.settingsNow.mode === "history"
+            width: parent.width
+            text: "Graphs of CPU frequency and temperature, drawn by the cooler."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
           }
 
           // ---- Stats mode ----
@@ -345,6 +386,7 @@ Panel {
             Text {
               width: parent.width
               text: "Scaled and cropped to 480×640. Pictures are stored in the cooler's flash memory, so avoid changing them constantly."
+                    + (root.settingsNow.ledColor && !root.settingsNow.image ? " Showing the LED colour border on black." : "")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -353,6 +395,86 @@ Panel {
           }
 
           PanelSeparator { width: parent.width }
+
+          PanelSectionHeader {
+            text: "Brightness  " + (root.settingsNow.brightness > 0 ? root.settingsNow.brightness + "%" : "(screen off)")
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+          PanelSlider {
+            width: parent.width
+            bar: root.bar
+            minimum: 0
+            maximum: 100
+            step: 1
+            integer: true
+            value: root.settingsNow.brightness
+            onReleased: function(v) { root.apply({ brightness: Math.round(v) }) }
+          }
+
+          PanelSectionHeader { text: "LED ring colour"; foreground: root.foreground; fontFamily: root.fontFamily }
+          ButtonGroup {
+            options: root.labelsFor(["temperature", "motherboard", "picture"], root.ledLabels)
+            value: root.ledLabels[root.settingsNow.led] || ""
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function(v) { root.apply({ led: root.idFor(v, root.ledLabels) }) }
+          }
+          Text {
+            width: parent.width
+            text: ({
+              "temperature": "Follows the CPU temperature.",
+              "motherboard": "Mirrors your motherboard's RGB (set it with your RGB software).",
+              "picture": "Takes the colour of the picture's edge. Pick a colour to paint a border in it (re-uploads the picture)."
+            })[root.settingsNow.led] || ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+          Flow {
+            visible: root.settingsNow.led === "picture"
+            width: parent.width
+            spacing: Style.space(8)
+            Repeater {
+              model: root.swatches
+              Rectangle {
+                required property var modelData
+                width: Style.space(24)
+                height: width
+                radius: Style.cornerRadius > 0 ? width / 2 : 0
+                color: modelData
+                border.width: root.settingsNow.ledColor.toLowerCase() === modelData ? 3 : 1
+                border.color: root.settingsNow.ledColor.toLowerCase() === modelData ? root.foreground : root.dim
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setLedColor(parent.modelData)
+                }
+              }
+            }
+            Button {
+              text: "Custom…"
+              bordered: true
+              foreground: root.foreground
+              onClicked: pickColorProc.running = true
+            }
+            Button {
+              text: "No border"
+              bordered: true
+              foreground: root.foreground
+              onClicked: root.apply({ ledColor: "" })
+            }
+          }
+
+          PanelSectionHeader { text: "When idle"; foreground: root.foreground; fontFamily: root.fontFamily }
+          ButtonGroup {
+            options: root.labelsFor(["off", "animation"], root.idleLabels)
+            value: root.idleLabels[root.settingsNow.idle] || ""
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function(v) { root.apply({ idle: root.idFor(v, root.idleLabels) }) }
+          }
 
           PanelSectionHeader { text: "Screen orientation"; foreground: root.foreground; fontFamily: root.fontFamily }
           ButtonGroup {

@@ -11,6 +11,12 @@
 #include <linux/hidraw.h>
 #include <sys/ioctl.h>
 
+// The device answers a known command by echoing its byte; 0x00 means rejected
+static bool echoes(const QByteArray &resp, quint8 command)
+{
+    return resp.size() >= 3 && static_cast<quint8>(resp[2]) == command;
+}
+
 DeepCoolDevice::DeepCoolDevice()
     : deviceType(DEVICE_TYPE_UNKNOWN)
     , usbContext(nullptr)
@@ -21,6 +27,9 @@ DeepCoolDevice::DeepCoolDevice()
     , fd(-1)
     , currentMode(MODE_CPU_INFO)
     , currentRotation(ROTATION_0)
+    , currentLed(LED_TEMPERATURE)
+    , currentBrightness(50)
+    , currentIdle(IDLE_ANIMATION)
     , currentScreen(SCREEN_CPU_TEMP)
     , currentAux(AUX_SYSTEM)
 {
@@ -360,17 +369,9 @@ bool DeepCoolDevice::initMachineInfoMode()
     qDebug() << "    Resp:" << resp.left(20).toHex();
     usleep(10000);
 
-    // 2. Command 0x02 - Config (includes rotation)
+    // 2. Command 0x02 - Display settings (idle, rotation, LED mode, brightness)
     qDebug() << "  Cmd 0x02...";
-    {
-        QByteArray configPayload;
-        configPayload.append(static_cast<char>(0x01));
-        configPayload.append(static_cast<char>(0x00));
-        configPayload.append(static_cast<char>(currentRotation & 0x03));
-        configPayload.append(static_cast<char>(0x01));
-        configPayload.append(static_cast<char>(0x24));
-        sendInitPacket(0x02, configPayload);
-    }
+    sendInitPacket(0x02, configPayload());
     usleep(10000);
 
     // 3-9. Setup commands
@@ -417,52 +418,44 @@ bool DeepCoolDevice::setDisplayMode(DisplayMode mode)
     return initMachineInfoMode();
 }
 
+QByteArray DeepCoolDevice::configPayload() const
+{
+    // 0x02: <idle> 01 <rotation> <LED mode> <brightness>  (see PROTOCOL.md)
+    QByteArray payload(5, 0);
+    payload[0] = static_cast<char>(currentIdle);
+    payload[1] = 0x01;
+    payload[2] = static_cast<char>(currentRotation & 0x03);
+    payload[3] = static_cast<char>(currentLed);
+    payload[4] = static_cast<char>(currentBrightness);
+    return payload;
+}
+
 bool DeepCoolDevice::setRotation(ScreenRotation rotation)
+{
+    return setDisplaySettings(rotation, currentLed, currentBrightness, currentIdle);
+}
+
+bool DeepCoolDevice::setDisplaySettings(ScreenRotation rotation, LedMode led, int brightness, IdleMode idle)
 {
     if (!isOpen()) {
         return false;
     }
-
-    // Rotation is sent via command 0x02 on endpoint 0x01
-    // Payload: 01 00 <rotation> 01 24
-    // rotation: 0x00=0°, 0x01=90°, 0x02=180°, 0x03=270°
-    QByteArray payload;
-    payload.append(static_cast<char>(0x01));
-    payload.append(static_cast<char>(0x00));
-    payload.append(static_cast<char>(rotation & 0x03));
-    payload.append(static_cast<char>(0x01));
-    payload.append(static_cast<char>(0x24));
-
-    QByteArray packet = buildPacket(CMD_CONFIG, payload);
-
-    if (deviceInfo.type == DEVICE_TYPE_USB_VENDOR && deviceHandle) {
-        // Must be sent on endpoint 0x01 (init endpoint), not 0x02
-        int transferred = 0;
-        int ret = libusb_bulk_transfer(deviceHandle, 0x01,
-            (unsigned char*)packet.data(), packet.size(),
-            &transferred, 1000);
-
-        if (ret < 0) {
-            qDebug() << "setRotation: send failed:" << libusb_error_name(ret);
-            return false;
-        }
-
-        // Read response from endpoint 0x81
-        QByteArray response(64, 0);
-        libusb_bulk_transfer(deviceHandle, 0x81,
-            (unsigned char*)response.data(), 64,
-            &transferred, 1000);
-    } else if (deviceInfo.type == DEVICE_TYPE_HID) {
-        if (!sendData(packet)) {
-            return false;
-        }
-        receiveData(64);
-    } else {
-        return false;
-    }
+    ScreenRotation oldRotation = currentRotation;
+    LedMode oldLed = currentLed;
+    int oldBrightness = currentBrightness;
+    IdleMode oldIdle = currentIdle;
 
     currentRotation = rotation;
-    qDebug() << "Screen rotation set to" << (rotation * 90) << "degrees";
+    currentLed = led;
+    currentBrightness = qBound(0, brightness, 100);
+    currentIdle = idle;
+    if (!echoes(sendControl(CMD_CONFIG, configPayload()), CMD_CONFIG)) {
+        currentRotation = oldRotation;
+        currentLed = oldLed;
+        currentBrightness = oldBrightness;
+        currentIdle = oldIdle;
+        return false;
+    }
     return true;
 }
 
@@ -532,11 +525,6 @@ bool DeepCoolDevice::writeControlRaw(const QByteArray &data)
     return ret >= 0 && transferred == data.size();
 }
 
-static bool echoes(const QByteArray &resp, quint8 command)
-{
-    return resp.size() >= 3 && static_cast<quint8>(resp[2]) == command;
-}
-
 bool DeepCoolDevice::uploadImage(const QByteArray &jpeg)
 {
     if (!isOpen() || jpeg.isEmpty()) {
@@ -590,10 +578,15 @@ bool DeepCoolDevice::uploadImage(const QByteArray &jpeg)
 
 bool DeepCoolDevice::setImageMode(bool on)
 {
+    return setScreenMode(on ? MODE_IMAGE : MODE_STATS);
+}
+
+bool DeepCoolDevice::setScreenMode(ScreenMode mode)
+{
     if (!isOpen()) {
         return false;
     }
-    return echoes(sendControl(0x03, QByteArray(1, on ? 0x02 : 0x01)), 0x03);
+    return echoes(sendControl(0x03, QByteArray(1, static_cast<char>(mode))), 0x03);
 }
 
 bool DeepCoolDevice::setLayout(MainScreen screen, AuxArea aux)

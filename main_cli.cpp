@@ -36,7 +36,9 @@
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QColor>
 #include <QImage>
+#include <QPainter>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -465,21 +467,40 @@ static const QMap<QString, AuxArea> kAuxAreas = {
     {"voltages", AUX_VOLTAGES}, {"system", AUX_SYSTEM}, {"core", AUX_CORE},
 };
 
+static const QMap<QString, ScreenMode> kScreenModes = {
+    {"stats", MODE_STATS}, {"image", MODE_IMAGE}, {"history", MODE_HISTORY},
+};
+static const QMap<QString, LedMode> kLedModes = {
+    {"temperature", LED_TEMPERATURE}, {"motherboard", LED_MOTHERBOARD}, {"picture", LED_IMAGE_EDGE},
+};
+static const QMap<QString, IdleMode> kIdleModes = {
+    {"off", IDLE_SCREEN_OFF}, {"animation", IDLE_ANIMATION},
+};
+
 // Desired display state. Set from CLI options, then overridden live by the control file
 // (written by the Omarchy plugin):
-//   {"mode": "stats"|"image", "screens": ["cpu-temp", ...], "aux": "system",
-//    "cycle": 10, "image": "/path/to/picture.png", "rotation": 0}
+//   {"mode": "stats"|"image"|"history", "screens": ["cpu-temp", ...], "aux": "system",
+//    "cycle": 10, "image": "/path/to/picture.png", "rotation": 0, "brightness": 50,
+//    "led": "temperature"|"motherboard"|"picture", "ledColor": "#ff8800", "idle": "off"|"animation"}
 struct Control {
-    bool imageMode = false;
+    ScreenMode screenMode = MODE_STATS;
     QList<MainScreen> screens = {SCREEN_CPU_TEMP};
     AuxArea aux = AUX_SYSTEM;
     int cycleSeconds = 10;
     QString imagePath;
     int rotationDeg = 0;
+    int brightness = 50;
+    LedMode led = LED_TEMPERATURE;
+    QString ledColor;           // with led=picture: border colour added around the picture
+    IdleMode idle = IDLE_ANIMATION;
 
+    bool sameDisplaySettings(const Control& o) const {
+        return rotationDeg == o.rotationDeg && brightness == o.brightness && led == o.led && idle == o.idle;
+    }
     bool operator==(const Control& o) const {
-        return imageMode == o.imageMode && screens == o.screens && aux == o.aux &&
-               cycleSeconds == o.cycleSeconds && imagePath == o.imagePath && rotationDeg == o.rotationDeg;
+        return screenMode == o.screenMode && screens == o.screens && aux == o.aux &&
+               cycleSeconds == o.cycleSeconds && imagePath == o.imagePath && ledColor == o.ledColor &&
+               sameDisplaySettings(o);
     }
 };
 
@@ -493,7 +514,8 @@ bool loadControlFile(const QString& path, Control& control) {
         logError(QString("Ignoring invalid control file %1: %2").arg(path, err.errorString()));
         return false;
     }
-    if (obj.contains("mode")) control.imageMode = obj.value("mode").toString() == "image";
+    QString mode = obj.value("mode").toString();
+    if (kScreenModes.contains(mode)) control.screenMode = kScreenModes.value(mode);
     if (obj.contains("screens")) {
         QList<MainScreen> screens;
         for (const QJsonValue& v : obj.value("screens").toArray()) {
@@ -507,16 +529,42 @@ bool loadControlFile(const QString& path, Control& control) {
     if (obj.contains("cycle")) control.cycleSeconds = qMax(1, obj.value("cycle").toInt(10));
     if (obj.contains("image")) control.imagePath = obj.value("image").toString();
     if (obj.contains("rotation")) control.rotationDeg = obj.value("rotation").toInt(0);
+    if (obj.contains("brightness")) control.brightness = qBound(0, obj.value("brightness").toInt(50), 100);
+    QString led = obj.value("led").toString();
+    if (kLedModes.contains(led)) control.led = kLedModes.value(led);
+    if (obj.contains("ledColor")) control.ledColor = obj.value("ledColor").toString();
+    QString idle = obj.value("idle").toString();
+    if (kIdleModes.contains(idle)) control.idle = kIdleModes.value(idle);
     return true;
 }
 
 // Scale/crop an image to the 480x640 portrait panel and encode it like DeepCreative does.
-QByteArray toPanelJpeg(const QString& path) {
-    QImage img(path);
-    if (img.isNull()) return QByteArray();
-    img = img.convertToFormat(QImage::Format_RGB888)
-             .scaled(480, 640, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-    img = img.copy((img.width() - 480) / 2, (img.height() - 640) / 2, 480, 640);
+// With a valid `borderColor`, a solid frame is painted around the edge: in "picture" LED mode
+// the ring takes the colour of the picture's edge, so this sets the ring colour. Without a
+// picture, the frame goes around a black screen.
+QByteArray toPanelJpeg(const QString& path, const QString& borderColor = QString()) {
+    QColor border(borderColor);
+    QImage img;
+    if (!path.isEmpty()) {
+        img = QImage(path);
+        if (img.isNull()) return QByteArray();
+        img = img.convertToFormat(QImage::Format_RGB888)
+                 .scaled(480, 640, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        img = img.copy((img.width() - 480) / 2, (img.height() - 640) / 2, 480, 640);
+    } else if (border.isValid()) {
+        img = QImage(480, 640, QImage::Format_RGB888);
+        img.fill(Qt::black);
+    } else {
+        return QByteArray();
+    }
+    if (border.isValid()) {
+        const int width = 24;
+        QPainter painter(&img);
+        painter.fillRect(0, 0, 480, width, border);
+        painter.fillRect(0, 640 - width, 480, width, border);
+        painter.fillRect(0, 0, width, 640, border);
+        painter.fillRect(480 - width, 0, width, 640, border);
+    }
     QByteArray jpeg;
     QBuffer buffer(&jpeg);
     buffer.open(QIODevice::WriteOnly);
@@ -589,6 +637,15 @@ int main(int argc, char *argv[])
         "Show this picture instead of stats (scaled/cropped to 480x640). Uploads write the "
         "cooler's flash, so it is only re-uploaded when the picture changes.", "file");
     parser.addOption(imageOption);
+
+    QCommandLineOption brightnessOption("brightness",
+        "Screen brightness 0-100 (0 turns the screen off)", "percent", "50");
+    parser.addOption(brightnessOption);
+
+    QCommandLineOption ledOption("led",
+        "LED ring colour source: temperature, motherboard (ARGB sync), or picture (edge colour)",
+        "mode", "temperature");
+    parser.addOption(ledOption);
 
     QCommandLineOption controlOption("control",
         "JSON file that overrides the display settings live (used by the Omarchy plugin)",
@@ -665,8 +722,14 @@ int main(int argc, char *argv[])
     control.aux = kAuxAreas.value(auxName);
     control.cycleSeconds = qMax(1, parser.value(cycleOption).toInt());
     control.rotationDeg = parser.value(rotateOption).toInt();
+    control.brightness = qBound(0, parser.value(brightnessOption).toInt(), 100);
+    if (!kLedModes.contains(parser.value(ledOption))) {
+        logError(QString("Unknown LED mode '%1'. Use: temperature, motherboard, picture").arg(parser.value(ledOption)));
+        return 1;
+    }
+    control.led = kLedModes.value(parser.value(ledOption));
     if (parser.isSet(imageOption)) {
-        control.imageMode = true;
+        control.screenMode = MODE_IMAGE;
         control.imagePath = parser.value(imageOption);
     }
 
@@ -804,20 +867,23 @@ int main(int argc, char *argv[])
     // Bring the device in line with `wanted`, touching only what changed
     auto applyControl = [&](const Control& wanted) {
         lastError.clear();
-        if (!applied || wanted.rotationDeg != current.rotationDeg) {
-            if (!device.setRotation(toRotation(wanted.rotationDeg))) {
-                lastError = "Failed to set rotation";
+        if (!applied || !wanted.sameDisplaySettings(current)) {
+            if (!device.setDisplaySettings(toRotation(wanted.rotationDeg), wanted.led,
+                                           wanted.brightness, wanted.idle)) {
+                lastError = "Failed to apply display settings";
             }
         }
-        if (wanted.imageMode) {
-            QByteArray jpeg = toPanelJpeg(wanted.imagePath);
+        if (wanted.screenMode == MODE_IMAGE) {
+            QString border = wanted.led == LED_IMAGE_EDGE ? wanted.ledColor : QString();
+            QByteArray jpeg = toPanelJpeg(wanted.imagePath, border);
             if (jpeg.isEmpty()) {
-                lastError = wanted.imagePath.isEmpty() ? "No image selected"
-                                                       : "Cannot read image " + wanted.imagePath;
+                lastError = wanted.imagePath.isEmpty() ? "No picture selected"
+                                                       : "Cannot read picture " + wanted.imagePath;
             } else {
                 QString hash = QCryptographicHash::hash(jpeg, QCryptographicHash::Md5).toHex();
                 if (hash != readFileText(uploadedHashPath)) {
-                    logInfo(QString("Uploading %1 (%2 KB)...").arg(wanted.imagePath).arg(jpeg.size() / 1024));
+                    logInfo(QString("Uploading %1 (%2 KB)...")
+                        .arg(wanted.imagePath.isEmpty() ? "colour frame" : wanted.imagePath).arg(jpeg.size() / 1024));
                     if (device.uploadImage(jpeg)) {
                         QDir().mkpath(QFileInfo(uploadedHashPath).path());
                         QSaveFile f(uploadedHashPath);
@@ -826,15 +892,19 @@ int main(int argc, char *argv[])
                             f.commit();
                         }
                     } else {
-                        lastError = "Image upload failed";
+                        lastError = "Picture upload failed";
                     }
-                } else if (!device.setImageMode(true)) {
-                    lastError = "Failed to switch to image mode";
+                } else if (!device.setScreenMode(MODE_IMAGE)) {
+                    lastError = "Failed to switch to picture mode";
                 }
             }
+        } else if (wanted.screenMode == MODE_HISTORY) {
+            if (!device.setScreenMode(MODE_HISTORY)) {
+                lastError = "Failed to switch to history mode";
+            }
         } else {
-            if (applied && current.imageMode) {
-                device.setImageMode(false);
+            if (applied && current.screenMode != MODE_STATS) {
+                device.setScreenMode(MODE_STATS);
             }
             screenIndex = 0;
             if (!device.setLayout(wanted.screens.first(), wanted.aux)) {
@@ -849,11 +919,14 @@ int main(int argc, char *argv[])
         screenTimer.restart();
 
         QStringList names;
-        for (MainScreen s : wanted.screens) names << screenName(s);
-        logInfo(wanted.imageMode
-            ? QString("Showing image: %1").arg(wanted.imagePath)
-            : QString("Layout: %1 | aux: %2%3").arg(names.join(','), kAuxAreas.key(wanted.aux),
-                  wanted.screens.size() > 1 ? QString(" | cycle: %1 s").arg(wanted.cycleSeconds) : QString()));
+        for (MainScreen sc : wanted.screens) names << screenName(sc);
+        QString what = wanted.screenMode == MODE_IMAGE ? QString("picture %1").arg(wanted.imagePath)
+                     : wanted.screenMode == MODE_HISTORY ? QString("history graphs")
+                     : QString("%1 | aux: %2%3").arg(names.join(','), kAuxAreas.key(wanted.aux),
+                           wanted.screens.size() > 1 ? QString(" | cycle: %1 s").arg(wanted.cycleSeconds) : QString());
+        logInfo(QString("Showing %1 | brightness %2 | LED %3%4")
+            .arg(what).arg(wanted.brightness).arg(kLedModes.key(wanted.led),
+                 wanted.led == LED_IMAGE_EDGE && !wanted.ledColor.isEmpty() ? " " + wanted.ledColor : QString()));
     };
 
     applyControl(control);
@@ -906,7 +979,7 @@ int main(int argc, char *argv[])
         }
 
         // Rotate built-in screens
-        if (!current.imageMode && current.screens.size() > 1 &&
+        if (current.screenMode == MODE_STATS && current.screens.size() > 1 &&
             screenTimer.elapsed() >= current.cycleSeconds * 1000LL) {
             screenIndex = (screenIndex + 1) % current.screens.size();
             device.setLayout(current.screens[screenIndex], current.aux);
@@ -928,7 +1001,11 @@ int main(int argc, char *argv[])
             {"connected", success},
             {"updated", QDateTime::currentSecsSinceEpoch()},
             {"error", lastError},
-            {"mode", current.imageMode ? "image" : "stats"},
+            {"mode", kScreenModes.key(current.screenMode)},
+            {"brightness", current.brightness},
+            {"led", kLedModes.key(current.led)},
+            {"ledColor", current.ledColor},
+            {"idle", kIdleModes.key(current.idle)},
             {"screen", screenName(current.screens.value(screenIndex, SCREEN_CPU_TEMP))},
             {"screens", screenList},
             {"aux", kAuxAreas.key(current.aux)},

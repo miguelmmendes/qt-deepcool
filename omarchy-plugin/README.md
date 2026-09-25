@@ -7,7 +7,10 @@ Shows the CPU temperature in the Omarchy bar; click it to control the MYSTIQUE s
 - **Bottom area**: GHz / CPU % / RAM %, CPU temp / GHz, or 3.3 / 5 / 12 V
 - **Picture**: choose any image (scaled/cropped to 480×640). Pictures are stored in the cooler's
   flash, so the service only uploads when the picture actually changes.
-- Screen **orientation**
+- **History** mode: the cooler's own CPU frequency / temperature graphs
+- **Brightness** (0 turns the screen off), **idle** behaviour, screen **orientation**
+- **LED ring**: follow CPU temperature, mirror motherboard RGB, or take the picture's edge colour —
+  with a colour picker that paints a border of that colour around the picture
 
 ## How it works
 
@@ -34,4 +37,9 @@ omarchy plugin enable bulletazz.deepcool
 omarchy bar move bulletazz.deepcool --section center   # icon-only right section clips the text
 ```
 
-Requires `zenity` for the picture chooser.
+Requires `zenity` for the picture and colour choosers.
+
+Open the panel from a keybinding with `omarchy-shell bulletazz.deepcool toggle`.
+
+When developing through the symlink, the shell doesn't notice edits to the linked files;
+run `omarchy restart shell` to load changes.

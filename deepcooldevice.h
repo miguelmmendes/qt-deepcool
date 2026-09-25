@@ -38,6 +38,24 @@ enum AuxArea {
     AUX_CORE     = 2        // "Core Data": CPU temp / GHz
 };
 
+// LED ring colour source (byte 3 of command 0x02)
+enum LedMode {
+    LED_TEMPERATURE = 0,    // Colour follows CPU temperature (firmware thresholds)
+    LED_MOTHERBOARD = 1,    // Mirror the motherboard's ARGB header
+    LED_IMAGE_EDGE  = 2     // Colour of the displayed picture's edge
+};
+// What the screen does when idle (byte 0 of command 0x02)
+enum IdleMode {
+    IDLE_SCREEN_OFF = 0,
+    IDLE_ANIMATION  = 1
+};
+// Top-level display mode (command 0x03)
+enum ScreenMode {
+    MODE_STATS   = 1,       // Built-in stats screens
+    MODE_IMAGE   = 2,       // Uploaded picture / slideshow
+    MODE_HISTORY = 3        // History graphs (CPU frequency, CPU temperature)
+};
+
 struct SystemData {
     float cpuTemp = 0;
     float cpuUsage = 0;
@@ -85,6 +103,9 @@ public:
     // Stored images persist in the device's flash, so call this sparingly.
     bool uploadImage(const QByteArray &jpeg);
     bool setImageMode(bool on);                      // 0x03 02 (image) / 0x03 01 (stats)
+    bool setScreenMode(ScreenMode mode);             // 0x03 <mode>
+    // Command 0x02: orientation, LED ring source, brightness (0 = screen off .. 100), idle behaviour
+    bool setDisplaySettings(ScreenRotation rotation, LedMode led, int brightness, IdleMode idle);
 
     // Device verification
     bool verifyDevice();
@@ -107,6 +128,9 @@ private:
     QString deviceName;
     DisplayMode currentMode;
     ScreenRotation currentRotation;
+    LedMode currentLed;
+    int currentBrightness;
+    IdleMode currentIdle;
     MainScreen currentScreen;
     AuxArea currentAux;
 
@@ -115,6 +139,7 @@ private:
     QByteArray sendControl(quint8 command, const QByteArray &payload);  // EP 0x01 -> reply on 0x81
     bool writeControlRaw(const QByteArray &data);                       // raw bulk write to EP 0x01
     static QByteArray clockPayload();
+    QByteArray configPayload() const;
     bool validateResponse(const QByteArray &response);
 
     // Command bytes (reverse-engineered from USB capture)

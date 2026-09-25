@@ -261,11 +261,29 @@ A GIF is sent as `DCLd`+JPEG repeated for each frame, then a single `dcldfinish`
 ### Other commands
 | Command | Payload | Meaning (confirmed on hardware unless noted) |
 |---|---|---|
-| `0x03` | `01` / `02` | Display mode: `01` = Machine Info (stats), `02` = image slideshow |
+| `0x03` | `01` / `02` / `03` | Display mode: `01` = Machine Info (stats), `02` = image slideshow, `03` = history graphs (CPU frequency + temperature) |
+| `0x02` | `<idle> 01 <rotation> <led> <brightness>` | Display settings, see below |
 | `0x09` | none | Clear the stored image list. DeepCreative "deletes one" by sending 0x09 and re-uploading the rest |
 | `0x14` | none | "Delete all" in DeepCreative (not yet tested from Linux) |
 | `0x07` | `<interval> <effect>` | Slideshow: interval 00/01/02 = 3/5/7 s (from DeepCreative capture); effect 00 = split(?), 01 = scroll, 02 = fade |
 | `0x08` | `<a> <b>` | Sent after uploads and on layout changes; exact meaning unknown |
+
+### Display settings (0x02), mapped 2026-09-25 from DeepCreative
+```
+AA 2E 02 <idle> 01 <rotation> <led> <brightness> ...
+```
+| Byte | Meaning | Values |
+|---|---|---|
+| idle | Idle behaviour | `00` screen off, `01` preset animation |
+| 01 | Constant in current DeepCreative (older captures had `00`) | |
+| rotation | Orientation | `00`-`03` = 0/90/180/270° |
+| led | LED ring colour source | `00` CPU temperature, `01` motherboard ARGB sync, `02` edge colour of the shown picture |
+| brightness | Screen brightness | `00` = screen off, observed up to `0x44`; qt-deepcool clamps 0-100 |
+
+All five settings are sent together, so the driver must remember them: re-sending the old fixed
+`01 00 <rot> 01 24` (as the original rotation code did) resets brightness and LED mode.
+There is no command for an arbitrary LED colour; qt-deepcool emulates one by painting a border
+of that colour around the picture while the LED follows the picture edge.
 
 Uploads **append** to a slideshow that the device keeps across power cycles (so they are stored in flash).
 To replace what's shown with a single image: `0x09`, `0x0F`, DCLd+JPEG, `dcldfinish`, `0x08 00 00`, `0x03 02`.
