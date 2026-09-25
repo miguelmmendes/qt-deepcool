@@ -329,3 +329,22 @@ the clock running itself; DeepCreative sends it once at startup.
 The display blanks if no data packets arrive for a while, so keep streaming `0x01` packets.
 `0x10` (status) is only valid on the data endpoint 0x02; on 0x01 it is answered with `00`.
 The CPU-temp screen shows whole degrees (the decimal byte is ignored).
+
+## Firmware and on-device storage (from DeepCreative's bundled MYSTIQUE_2.70.bin)
+
+DeepCreative (Electron app, `C:\DeepCool`) ships `resources/app.asar.unpacked/resources/fw/MYSTIQUE_2.70.bin`
+(451 096 bytes, SHA-256 `df9c19b5…17e6e`, not redistributed here). It is ARM Cortex-M code for a
+**Synwit** MCU running **LVGL** with Synwit's "SynwitUI" layer. Strings show how the device is organised:
+
+- **Stock screens are data, not code**: the firmware loads `SPI:ui.bin` (screen table, widgets, resources,
+  fonts; format-versioned: "Incompatible UI data(fmt:%d.%d)") from the internal SPI flash. The app does not
+  ship a `ui.bin`, so it is written at the factory. Changing the stock theme means replacing that file, which
+  needs (1) a way to write it and (2) the SynwitUI format; neither is known.
+- **Uploaded pictures live on a filesystem** (`SD:` volume on flash): `%s/index%03d.jpg`, `%s/angle_%d.jpg`,
+  `%s/angle_0/index%03d.jpg`, `SD:GIF/%s/config.cfg`, `SD:DeepCool.cfg`. The 32-character ID in the DCLd
+  upload header is most likely the `%s` folder name.
+- **Firmware update** goes through a file: `SD:FW_update.bin`. How DeepCreative transfers it (possibly a
+  DCLd-style upload with another kind byte) is not captured yet.
+
+Tools: `capture/analysis/winimg.py` (read-only NTFS access to the VM disk image) and
+`capture/analysis/asar_get.py` (extract files from app.asar).

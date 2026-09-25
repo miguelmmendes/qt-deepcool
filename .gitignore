@@ -6,3 +6,4 @@ devicedetector.cpp
 devicedetector.h
 __pycache__/
 capture/analysis/extracted/
+capture/analysis/winfiles/
