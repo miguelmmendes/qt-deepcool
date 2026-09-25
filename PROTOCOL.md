@@ -277,11 +277,12 @@ AA 2E 02 <idle> 01 <rotation> <led> <brightness> ...
 | idle | Idle behaviour | `00` screen off, `01` preset animation |
 | 01 | Constant in current DeepCreative (older captures had `00`) | |
 | rotation | Orientation | `00`-`03` = 0/90/180/270° |
-| led | LED ring colour source | `00` CPU temperature, `01` motherboard ARGB sync, `02` edge colour of the shown picture |
+| led | LED ring colour source | `00` motherboard ARGB sync, `01` CPU temperature, `02` edge colour of the shown picture (confirmed on hardware) |
 | brightness | Screen brightness | `00` = screen off, observed up to `0x44`; qt-deepcool clamps 0-100 |
 
 All five settings are sent together, so the driver must remember them: re-sending the old fixed
 `01 00 <rot> 01 24` (as the original rotation code did) resets brightness and LED mode.
+The original init therefore always forced the LED to temperature mode.
 There is no command for an arbitrary LED colour; qt-deepcool emulates one by painting a border
 of that colour around the picture while the LED follows the picture edge.
 

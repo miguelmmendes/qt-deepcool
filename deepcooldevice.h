@@ -40,8 +40,8 @@ enum AuxArea {
 
 // LED ring colour source (byte 3 of command 0x02)
 enum LedMode {
-    LED_TEMPERATURE = 0,    // Colour follows CPU temperature (firmware thresholds)
-    LED_MOTHERBOARD = 1,    // Mirror the motherboard's ARGB header
+    LED_MOTHERBOARD = 0,    // Mirror the motherboard's ARGB header
+    LED_TEMPERATURE = 1,    // Colour follows CPU temperature (firmware thresholds)
     LED_IMAGE_EDGE  = 2     // Colour of the displayed picture's edge
 };
 // What the screen does when idle (byte 0 of command 0x02)
