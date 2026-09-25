@@ -11,8 +11,9 @@ and then replaying commands from Linux. The findings live in [../PROTOCOL.md](..
 | Stats layouts (`0x04 <main> 00 00 <aux>`) | 6 main screens, 3 bottom areas, all confirmed |
 | Clock (`0x0A` on the data endpoint) | Confirmed; qt-deepcool syncs it at start and hourly |
 | Image upload (`0x0F` + `DCLd` header + JPEG + `dcldfinish`) | Confirmed from Linux; 480x640 JPEG, ~0.6 s |
-| Replace image (`0x09` clear, then upload) | Confirmed |
-| Slideshow settings (`0x07`), delete all (`0x14`) | Seen in captures, not tested from Linux |
+| Replace image (`0x14` delete all, then upload; `0x09` alone leaks storage) | Confirmed |
+| Animated GIF upload (kind 02 frames, `0x08 01 00`) | Confirmed from Linux |
+| Slideshow settings (`0x07`) | Seen in captures, not tested from Linux |
 | Label text (`0x15`-`0x17`) | Rejected by firmware; labels are fixed |
 | Display blanks without data | Observed; keep streaming `0x01` packets |
 
@@ -30,7 +31,7 @@ program can hold the device.
 
 | Script | Purpose |
 |---|---|
-| `mystique_image.py` | Upload an image (`upload pic.png`), test card (`test`), back to stats (`info`), `clear`, or `raw <cmd> <hex>` |
+| `mystique_image.py` | Upload an image (`upload pic.png`), animated GIF (`gif anim.gif`), test card (`test`), back to stats (`info`), `clear`, or `raw <cmd> <hex>` |
 | `experiment.py` | Send commands, then stream fixed field values (`--cmd 04:05000001 --set 3=11 ...`) |
 | `mode_sweep.py` | Cycle `0x04` main screens or aux areas with byte-numbered values (byte *i* = *i*) |
 | `layout_cycle.py`, `aux_label_test.py` | One-off experiments (0x08 is not a layout selector; labels rejected) |

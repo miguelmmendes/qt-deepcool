@@ -5,6 +5,7 @@ Protocol reverse-engineered from DeepCreative USB captures (see PROTOCOL.md, "Im
 
 Usage:
   uv run --with pyusb --with pillow mystique_image.py upload picture.png [--slot N]
+  uv run --with pyusb --with pillow mystique_image.py gif anim.gif [--duration MS]  # animated GIF
   uv run --with pyusb --with pillow mystique_image.py test            # render + upload a test card
   uv run --with pyusb --with pillow mystique_image.py info            # back to the built-in stats screen
   uv run --with pyusb --with pillow mystique_image.py clear           # delete all stored images (0x14)
@@ -91,6 +92,39 @@ def upload_image(dev, jpeg, slot=0, replace=True):
     print(f"uploaded {len(jpeg)} bytes in {t1 - t0:.3f}s (total {time.monotonic() - t0:.3f}s)")
 
 
+def fit(img):
+    """Scale/crop to the 480x640 panel, like toPanelJpeg in main_cli.cpp."""
+    img = img.convert("RGB")
+    scale = max(WIDTH / img.width, HEIGHT / img.height)
+    img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+    left, top = (img.width - WIDTH) // 2, (img.height - HEIGHT) // 2
+    return img.crop((left, top, left + WIDTH, top + HEIGHT))
+
+
+def upload_gif(path, dev, duration_ms=None):
+    src = Image.open(path)
+    frames, delays = [], []
+    for i in range(getattr(src, "n_frames", 1)):
+        src.seek(i)
+        frames.append(to_jpeg(fit(src)))
+        delays.append(src.info.get("duration", 100) or 100)
+    frames = frames[:255]
+    duration_ms = duration_ms if duration_ms is not None else sum(delays[:len(frames)])
+    ident = hashlib.md5(b"".join(frames)).hexdigest()
+    print(f"{len(frames)} frames, {sum(map(len, frames)) // 1024} KB, duration field {duration_ms}")
+    t0 = time.monotonic()
+    print("0x14 (delete all) reply:", command(dev, 0x14).hex()[:12])
+    print("0x0F reply:", command(dev, 0x0F).hex()[:12])
+    for i, jpeg in enumerate(frames):
+        dev.write(EP_CTRL_OUT, dcld_header(jpeg, 2, len(frames), duration_ms, i, ident), timeout=5000)
+        for off in range(0, len(jpeg), 64):
+            dev.write(EP_CTRL_OUT, jpeg[off:off + 64], timeout=5000)
+    dev.write(EP_CTRL_OUT, b"dcldfinish".ljust(64, b"\0"), timeout=5000)
+    print("0x08 reply:", command(dev, 0x08, b"\x01\x00").hex()[:12])
+    print("0x03 (image mode) reply:", command(dev, 0x03, b"\x02").hex()[:12])
+    print(f"uploaded in {time.monotonic() - t0:.3f}s")
+
+
 def test_card():
     img = Image.new("RGB", (WIDTH, HEIGHT), (12, 14, 22))
     d = ImageDraw.Draw(img)
@@ -119,6 +153,9 @@ def main():
     try:
         if action == "upload":
             upload_image(dev, to_jpeg(Image.open(sys.argv[2])), slot, "--append" not in sys.argv)
+        elif action == "gif":
+            ms = int(sys.argv[sys.argv.index("--duration") + 1]) if "--duration" in sys.argv else None
+            upload_gif(sys.argv[2], dev, ms)
         elif action == "test":
             upload_image(dev, to_jpeg(test_card()), slot, "--append" not in sys.argv)
         elif action == "clear":

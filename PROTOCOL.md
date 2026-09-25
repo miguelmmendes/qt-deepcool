@@ -249,33 +249,34 @@ Offset  Size  Description
 11-12   2     00 00
 13      1     GIF: frame count (00 for stills)
 14      1     00
-15-16   2     GIF: 0x05DC = 1500 (3 frames x 500 ms; total or per-GIF duration, unconfirmed)
+15-16   2     GIF: duration of one whole loop in ms (LE; confirmed: 28 frames x 100 ms = 2800 plays at normal speed)
 17      1     GIF: frame index (0-based)
 18-19   2     00 00
 20-51   32    ASCII hex ID (MD5-like; not MD5 of the JPEG or the source file; same for all frames of one GIF)
 52-61   10    00
 62-63   2     16-bit sum of bytes 0-61 (LE)
 ```
-A GIF is sent as `DCLd`+JPEG repeated for each frame, then a single `dcldfinish`.
+A GIF is sent as `DCLd`+JPEG repeated for each frame, then a single `dcldfinish`, then `0x08 01 00`.
+Confirmed from Linux 2026-09-25: a 28-frame, 1 MB GIF takes ~18 s to upload and animates correctly.
 
 ### Other commands
 | Command | Payload | Meaning (confirmed on hardware unless noted) |
 |---|---|---|
 | `0x03` | `01` / `02` / `03` | Display mode: `01` = Machine Info (stats), `02` = image slideshow, `03` = history graphs (CPU frequency + temperature) |
-| `0x02` | `<idle> 01 <rotation> <led> <brightness>` | Display settings, see below |
-| `0x09` | none | Clear the stored image list. DeepCreative "deletes one" by sending 0x09 and re-uploading the rest |
-| `0x14` | none | "Delete all" in DeepCreative (not yet tested from Linux) |
+| `0x02` | `<idle> 00 <rotation> <led> <brightness>` | Display settings, see below |
+| `0x09` | none | Clear the stored image list, but **not the files**. DeepCreative "deletes one" by sending 0x09 and re-uploading the rest |
+| `0x14` | none | Delete all stored images and their files (confirmed from Linux) |
 | `0x07` | `<interval> <effect>` | Slideshow: interval 00/01/02 = 3/5/7 s (from DeepCreative capture); effect 00 = split(?), 01 = scroll, 02 = fade |
 | `0x08` | `<a> <b>` | Sent after uploads and on layout changes; exact meaning unknown |
 
 ### Display settings (0x02), mapped 2026-09-25 from DeepCreative
 ```
-AA 2E 02 <idle> 01 <rotation> <led> <brightness> ...
+AA 2E 02 <idle> <flag> <rotation> <led> <brightness> ...
 ```
 | Byte | Meaning | Values |
 |---|---|---|
 | idle | Idle behaviour | `00` screen off, `01` preset animation |
-| 01 | Constant in current DeepCreative (older captures had `00`) | |
+| flag | `00` = use the rotation byte. `01` (always sent by current DeepCreative, whose captures only show 0°) makes the cooler **ignore** the rotation byte (confirmed on hardware 2026-09-25) | |
 | rotation | Orientation | `00`-`03` = 0/90/180/270° |
 | led | LED ring colour source | `00` motherboard ARGB sync, `01` CPU temperature, `02` edge colour of the shown picture (confirmed on hardware) |
 | brightness | Screen brightness | `00` = screen off, observed up to `0x44`; qt-deepcool clamps 0-100 |
@@ -287,7 +288,12 @@ There is no command for an arbitrary LED colour; qt-deepcool emulates one by pai
 of that colour around the picture while the LED follows the picture edge.
 
 Uploads **append** to a slideshow that the device keeps across power cycles (so they are stored in flash).
-To replace what's shown with a single image: `0x09`, `0x0F`, DCLd+JPEG, `dcldfinish`, `0x08 00 00`, `0x03 02`.
+To replace what's shown with a single image: `0x14`, `0x09`, `0x0F`, DCLd+JPEG, `dcldfinish`, `0x08 00 00`, `0x03 02`.
+
+**Storage fills up if only `0x09` is used.** After many `0x09`-based replacements, new uploads were
+still acknowledged (every command echoed) but not stored, and the screen kept cycling older
+pictures. `0x14` (delete all) fixed it. `0x08 00 FF` returned `00` throughout, so it isn't a usable
+"is my upload there" check.
 A 15 KB JPEG takes ~0.6 s end to end. Tool: `capture/mystique_image.py`.
 
 ## Machine Info Layouts and Data Fields (mapped on hardware 2026-09-25)

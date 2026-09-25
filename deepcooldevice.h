@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QByteArray>
+#include <QList>
 #include <libusb-1.0/libusb.h>
 #include <linux/hidraw.h>
 #include <sys/ioctl.h>
@@ -99,9 +100,10 @@ public:
     ScreenRotation getRotation() const { return currentRotation; }
     bool setLayout(MainScreen screen, AuxArea aux);  // Switch built-in screen (cmd 0x04)
     bool syncClock();                                // Set device clock to local time (cmd 0x0A)
-    // Replace the stored slideshow with one 480x640 baseline JPEG and show it.
+    // Replace everything stored with one 480x640 baseline JPEG, or with the frames of a GIF
+    // (more than one frame; `loopMs` = total duration of one loop), and show it.
     // Stored images persist in the device's flash, so call this sparingly.
-    bool uploadImage(const QByteArray &jpeg);
+    bool uploadImage(const QList<QByteArray> &frames, int loopMs = 0);
     bool setImageMode(bool on);                      // 0x03 02 (image) / 0x03 01 (stats)
     bool setScreenMode(ScreenMode mode);             // 0x03 <mode>
     // Command 0x02: orientation, LED ring source, brightness (0 = screen off .. 100), idle behaviour

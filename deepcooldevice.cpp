@@ -420,10 +420,11 @@ bool DeepCoolDevice::setDisplayMode(DisplayMode mode)
 
 QByteArray DeepCoolDevice::configPayload() const
 {
-    // 0x02: <idle> 01 <rotation> <LED mode> <brightness>  (see PROTOCOL.md)
+    // 0x02: <idle> 00 <rotation> <LED mode> <brightness>  (see PROTOCOL.md)
+    // Byte 1 must be 00: with 01 (what DeepCreative sends) the cooler ignores the rotation byte.
     QByteArray payload(5, 0);
     payload[0] = static_cast<char>(currentIdle);
-    payload[1] = 0x01;
+    payload[1] = 0x00;
     payload[2] = static_cast<char>(currentRotation & 0x03);
     payload[3] = static_cast<char>(currentLed);
     payload[4] = static_cast<char>(currentBrightness);
@@ -525,45 +526,64 @@ bool DeepCoolDevice::writeControlRaw(const QByteArray &data)
     return ret >= 0 && transferred == data.size();
 }
 
-bool DeepCoolDevice::uploadImage(const QByteArray &jpeg)
+bool DeepCoolDevice::uploadImage(const QList<QByteArray> &frames, int loopMs)
 {
-    if (!isOpen() || jpeg.isEmpty()) {
+    if (!isOpen() || frames.isEmpty() || frames.size() > 255) {
         return false;
     }
+    const bool gif = frames.size() > 1;
 
-    // 0x09 clears the stored list so the new image replaces it instead of joining a slideshow
-    if (!echoes(sendControl(0x09, QByteArray()), 0x09) ||
+    // 0x14 deletes every stored file. 0x09 only empties the list: the files stay behind until
+    // storage fills up, after which uploads are silently dropped and old pictures keep showing.
+    if (!echoes(sendControl(0x14, QByteArray()), 0x14) ||
+        !echoes(sendControl(0x09, QByteArray()), 0x09) ||
         !echoes(sendControl(0x0F, QByteArray()), 0x0F)) {
         return false;
     }
 
-    // 64-byte DCLd header (see PROTOCOL.md "Image Upload")
-    quint16 jpegSum = 0;
-    for (char c : jpeg) {
-        jpegSum += static_cast<quint8>(c);
+    // All frames of one GIF share this ID (see PROTOCOL.md "DCLd header")
+    QCryptographicHash idHash(QCryptographicHash::Md5);
+    for (const QByteArray &jpeg : frames) {
+        idHash.addData(jpeg);
     }
-    QByteArray header(64, 0);
-    header.replace(0, 4, "DCLd");
-    header[4] = 0x01;  // still image
-    for (int i = 0; i < 4; ++i) {
-        header[5 + i] = static_cast<char>((jpeg.size() >> (8 * i)) & 0xFF);
-    }
-    header[9] = static_cast<char>(jpegSum & 0xFF);
-    header[10] = static_cast<char>(jpegSum >> 8);
-    header.replace(20, 32, QCryptographicHash::hash(jpeg, QCryptographicHash::Md5).toHex());
-    quint16 headerSum = 0;
-    for (int i = 0; i < 62; ++i) {
-        headerSum += static_cast<quint8>(header[i]);
-    }
-    header[62] = static_cast<char>(headerSum & 0xFF);
-    header[63] = static_cast<char>(headerSum >> 8);
+    const QByteArray id = idHash.result().toHex();
+    const quint16 loop = static_cast<quint16>(qBound(0, loopMs, 0xFFFF));
 
-    if (!writeControlRaw(header)) {
-        return false;
-    }
-    for (int offset = 0; offset < jpeg.size(); offset += 64) {
-        if (!writeControlRaw(jpeg.mid(offset, 64))) {
+    for (int index = 0; index < frames.size(); ++index) {
+        const QByteArray &jpeg = frames[index];
+        quint16 jpegSum = 0;
+        for (char c : jpeg) {
+            jpegSum += static_cast<quint8>(c);
+        }
+        QByteArray header(64, 0);
+        header.replace(0, 4, "DCLd");
+        header[4] = gif ? 0x02 : 0x01;  // GIF frame / still image
+        for (int i = 0; i < 4; ++i) {
+            header[5 + i] = static_cast<char>((jpeg.size() >> (8 * i)) & 0xFF);
+        }
+        header[9] = static_cast<char>(jpegSum & 0xFF);
+        header[10] = static_cast<char>(jpegSum >> 8);
+        if (gif) {
+            header[13] = static_cast<char>(frames.size());
+            header[15] = static_cast<char>(loop & 0xFF);
+            header[16] = static_cast<char>(loop >> 8);
+            header[17] = static_cast<char>(index);
+        }
+        header.replace(20, 32, id);
+        quint16 headerSum = 0;
+        for (int i = 0; i < 62; ++i) {
+            headerSum += static_cast<quint8>(header[i]);
+        }
+        header[62] = static_cast<char>(headerSum & 0xFF);
+        header[63] = static_cast<char>(headerSum >> 8);
+
+        if (!writeControlRaw(header)) {
             return false;
+        }
+        for (int offset = 0; offset < jpeg.size(); offset += 64) {
+            if (!writeControlRaw(jpeg.mid(offset, 64))) {
+                return false;
+            }
         }
     }
     QByteArray finish("dcldfinish");
@@ -572,7 +592,9 @@ bool DeepCoolDevice::uploadImage(const QByteArray &jpeg)
         return false;
     }
 
-    sendControl(0x08, QByteArray(2, 0));
+    QByteArray select(2, 0);
+    select[0] = gif ? 0x01 : 0x00;
+    sendControl(0x08, select);
     return setImageMode(true);
 }
 

@@ -5,7 +5,8 @@ Shows the CPU temperature in the Omarchy bar; click it to control the MYSTIQUE s
 - **Stats / Picture** mode
 - Built-in **screen** (CPU temp, CPU frequency, pump, CPU fan, fan combo, clock), or **rotate** between several
 - **Bottom area**: GHz / CPU % / RAM %, CPU temp / GHz, or 3.3 / 5 / 12 V
-- **Picture**: choose any image (scaled/cropped to 480×640). Pictures are stored in the cooler's
+- **Picture**: choose any image or animated GIF, then drag/zoom a 3:4 box to pick the part that fills
+  the 480×640 screen, or show the whole picture with black bars. Pictures are stored in the cooler's
   flash, so the service only uploads when the picture actually changes.
 - **History** mode: the cooler's own CPU frequency / temperature graphs
 - **Brightness** (0 turns the screen off), **idle** behaviour, screen **orientation**

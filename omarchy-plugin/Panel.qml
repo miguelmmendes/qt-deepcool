@@ -55,7 +55,9 @@ Panel {
     brightness: status.brightness !== undefined ? status.brightness : 50,
     led: status.led || "temperature",
     ledColor: status.ledColor || "",
-    idle: status.idle || "animation"
+    idle: status.idle || "animation",
+    fit: status.fit || "fill",
+    crop: status.crop || []
   }
   readonly property bool rotating: settingsNow.screens.length > 1
   readonly property string barLabel: serviceUp ? "󰈐 " + Math.round(status.cpuTemp || 0) + "°" : "󰈐"
@@ -77,6 +79,23 @@ Panel {
 
   function fmt(value, digits, suffix) {
     return (value === undefined || value === null) ? "–" : Number(value).toFixed(digits) + suffix
+  }
+
+  // Largest 3:4 box (the 480x640 panel) that fits a picture of this aspect ratio, centred,
+  // as fractions of the picture's width/height
+  function fullCrop(aspect) {
+    var panel = 480 / 640
+    var w = aspect > panel ? panel / aspect : 1
+    var h = aspect > panel ? 1 : aspect / panel
+    return [(1 - w) / 2, (1 - h) / 2, w, h]
+  }
+
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v))
+  }
+
+  function fileUrl(path) {
+    return path ? "file://" + path.split("/").map(encodeURIComponent).join("/") : ""
   }
 
   function fileName(path) {
@@ -132,7 +151,7 @@ Panel {
     }
     onExited: function(exitCode) {
       var path = String(pickStdout.text || "").trim()
-      if (exitCode === 0 && path !== "") root.apply({ mode: "image", image: path })
+      if (exitCode === 0 && path !== "") root.apply({ mode: "image", image: path, crop: [] })
     }
   }
 
@@ -383,9 +402,168 @@ Panel {
                 width: column.width - Style.space(160)
               }
             }
+            ButtonGroup {
+              visible: root.settingsNow.image !== ""
+              options: ["Fill (crop)", "Whole picture"]
+              value: root.settingsNow.fit === "fit" ? "Whole picture" : "Fill (crop)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onChanged: function(v) { root.apply({ fit: v === "Whole picture" ? "fit" : "fill" }) }
+            }
+
+            // Crop editor: the cooler shows what's inside the 3:4 box. Drag to move it, scroll or
+            // use the slider to zoom. Nothing is sent until "Apply crop": each change re-uploads,
+            // and a burst of uploads can hang the cooler.
+            Item {
+              id: cropEditor
+              visible: root.settingsNow.image !== ""
+              width: parent.width
+              height: Style.space(280)
+
+              readonly property real aspect: preview.implicitHeight > 0 ? preview.implicitWidth / preview.implicitHeight : 0
+              readonly property var full: root.fullCrop(aspect || 0.75)
+              property var draft: null
+              readonly property var crop: draft || (root.settingsNow.crop.length === 4 ? root.settingsNow.crop : full)
+              readonly property real zoom: full[2] / crop[2]
+              readonly property bool editing: root.settingsNow.fit !== "fit" && preview.status === Image.Ready
+
+              // Keep the box's centre, change its size; clamp inside the picture
+              function zoomTo(z) {
+                var c = crop
+                z = root.clamp(z, 1, 8)
+                var w = full[2] / z, h = full[3] / z
+                var cx = c[0] + c[2] / 2, cy = c[1] + c[3] / 2
+                draft = [root.clamp(cx - w / 2, 0, 1 - w), root.clamp(cy - h / 2, 0, 1 - h), w, h]
+              }
+
+              function commit() {
+                if (!draft) return
+                var c = draft.map(function(v) { return Math.round(v * 10000) / 10000 })
+                root.apply({ crop: c })
+                draft = null
+              }
+
+              Rectangle {
+                anchors.fill: parent
+                color: "black"
+              }
+
+              Image {
+                id: preview
+                anchors.fill: parent
+                source: root.fileUrl(root.settingsNow.image)
+                sourceSize.width: 800
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                smooth: true
+              }
+
+              // Painted picture area, in item coordinates
+              Item {
+                id: area
+                visible: cropEditor.editing
+                x: (cropEditor.width - preview.paintedWidth) / 2
+                y: (cropEditor.height - preview.paintedHeight) / 2
+                width: preview.paintedWidth
+                height: preview.paintedHeight
+
+                Item {
+                  id: box
+                  x: cropEditor.crop[0] * area.width
+                  y: cropEditor.crop[1] * area.height
+                  width: cropEditor.crop[2] * area.width
+                  height: cropEditor.crop[3] * area.height
+                }
+
+                // Dim everything outside the box
+                Rectangle { color: "#a0000000"; x: 0; y: 0; width: area.width; height: box.y }
+                Rectangle { color: "#a0000000"; x: 0; y: box.y + box.height; width: area.width; height: area.height - y }
+                Rectangle { color: "#a0000000"; x: 0; y: box.y; width: box.x; height: box.height }
+                Rectangle { color: "#a0000000"; x: box.x + box.width; y: box.y; width: area.width - x; height: box.height }
+                Rectangle {
+                  x: box.x; y: box.y; width: box.width; height: box.height
+                  color: "transparent"
+                  border.width: 2
+                  border.color: root.foreground
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                  property real startX
+                  property real startY
+                  property var startCrop
+                  onPressed: function(mouse) {
+                    startX = mouse.x
+                    startY = mouse.y
+                    startCrop = cropEditor.crop
+                  }
+                  onPositionChanged: function(mouse) {
+                    var c = startCrop
+                    cropEditor.draft = [
+                      root.clamp(c[0] + (mouse.x - startX) / area.width, 0, 1 - c[2]),
+                      root.clamp(c[1] + (mouse.y - startY) / area.height, 0, 1 - c[3]),
+                      c[2], c[3]]
+                  }
+                  onWheel: function(wheel) {
+                    cropEditor.zoomTo(cropEditor.zoom * (wheel.angleDelta.y > 0 ? 1.1 : 1 / 1.1))
+                  }
+                }
+              }
+            }
+
+            Row {
+              visible: cropEditor.visible && cropEditor.editing
+              width: parent.width
+              spacing: Style.space(10)
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Zoom " + cropEditor.zoom.toFixed(1) + "×"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              PanelSlider {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - Style.space(190)
+                bar: root.bar
+                minimum: 1
+                maximum: 8
+                step: 0.1
+                value: cropEditor.zoom
+                onMoved: function(v) { cropEditor.zoomTo(v) }
+                onReleased: function(v) { cropEditor.zoomTo(v) }
+              }
+              Button {
+                text: "Centre"
+                bordered: true
+                foreground: root.foreground
+                onClicked: cropEditor.draft = cropEditor.full
+              }
+            }
+
+            Row {
+              visible: cropEditor.draft !== null
+              spacing: Style.space(10)
+              Button {
+                text: "Apply crop"
+                bordered: true
+                foreground: root.foreground
+                onClicked: cropEditor.commit()
+              }
+              Button {
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                onClicked: cropEditor.draft = null
+              }
+            }
+
             Text {
               width: parent.width
-              text: "Scaled and cropped to 480×640. Pictures are stored in the cooler's flash memory, so avoid changing them constantly."
+              text: (root.settingsNow.fit === "fit" ? "The whole picture is shown, with black bars. "
+                                                    : "Drag the box to choose what fills the 480×640 screen, scroll to zoom, then Apply. ")
+                    + "Every change re-uploads the picture to the cooler's flash (GIFs take a few seconds), so avoid changing it constantly."
                     + (root.settingsNow.ledColor && !root.settingsNow.image ? " Showing the LED colour border on black." : "")
               color: root.dim
               font.family: root.fontFamily

@@ -38,6 +38,8 @@
 #include <QFileInfo>
 #include <QColor>
 #include <QImage>
+#include <QImageReader>
+#include <QRectF>
 #include <QPainter>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -481,7 +483,10 @@ static const QMap<QString, IdleMode> kIdleModes = {
 // (written by the Omarchy plugin):
 //   {"mode": "stats"|"image"|"history", "screens": ["cpu-temp", ...], "aux": "system",
 //    "cycle": 10, "image": "/path/to/picture.png", "rotation": 0, "brightness": 50,
-//    "led": "temperature"|"motherboard"|"picture", "ledColor": "#ff8800", "idle": "off"|"animation"}
+//    "led": "temperature"|"motherboard"|"picture", "ledColor": "#ff8800", "idle": "off"|"animation",
+//    "fit": "fill"|"fit", "crop": [x, y, w, h]}
+// `crop` is the part of the picture shown with fit=fill, as fractions of its width/height
+// (empty = centred); fit=fit shows the whole picture with black bars.
 struct Control {
     ScreenMode screenMode = MODE_STATS;
     QList<MainScreen> screens = {SCREEN_CPU_TEMP};
@@ -492,14 +497,24 @@ struct Control {
     int brightness = 50;
     LedMode led = LED_TEMPERATURE;
     QString ledColor;           // with led=picture: border colour added around the picture
+    bool fitWhole = false;      // show the whole picture (black bars) instead of filling the panel
+    QRectF crop;                // normalised crop area for fill; null = centred
     IdleMode idle = IDLE_ANIMATION;
 
+    // Same picture on screen, i.e. no upload needed to go from `o` to this
+    bool samePicture(const Control& o) const {
+        QString border = led == LED_IMAGE_EDGE ? ledColor : QString();
+        QString oBorder = o.led == LED_IMAGE_EDGE ? o.ledColor : QString();
+        return screenMode == o.screenMode && imagePath == o.imagePath && border == oBorder &&
+               fitWhole == o.fitWhole && crop == o.crop;
+    }
     bool sameDisplaySettings(const Control& o) const {
         return rotationDeg == o.rotationDeg && brightness == o.brightness && led == o.led && idle == o.idle;
     }
     bool operator==(const Control& o) const {
         return screenMode == o.screenMode && screens == o.screens && aux == o.aux &&
                cycleSeconds == o.cycleSeconds && imagePath == o.imagePath && ledColor == o.ledColor &&
+               fitWhole == o.fitWhole && crop == o.crop &&
                sameDisplaySettings(o);
     }
 };
@@ -533,43 +548,88 @@ bool loadControlFile(const QString& path, Control& control) {
     QString led = obj.value("led").toString();
     if (kLedModes.contains(led)) control.led = kLedModes.value(led);
     if (obj.contains("ledColor")) control.ledColor = obj.value("ledColor").toString();
+    if (obj.contains("fit")) control.fitWhole = obj.value("fit").toString() == "fit";
+    if (obj.contains("crop")) {
+        QJsonArray c = obj.value("crop").toArray();
+        QRectF crop;
+        if (c.size() == 4) {
+            crop = QRectF(c[0].toDouble(), c[1].toDouble(), c[2].toDouble(), c[3].toDouble())
+                       .intersected(QRectF(0, 0, 1, 1));
+        }
+        control.crop = crop.width() > 0.01 && crop.height() > 0.01 ? crop : QRectF();
+    }
     QString idle = obj.value("idle").toString();
     if (kIdleModes.contains(idle)) control.idle = kIdleModes.value(idle);
     return true;
 }
 
-// Scale/crop an image to the 480x640 portrait panel and encode it like DeepCreative does.
+// Scale/crop a picture to the 480x640 portrait panel and encode it like DeepCreative does.
+// Animated pictures (GIF) give one JPEG per frame, plus the loop duration in `loopMs`.
+// `crop` (normalised, null = centred) picks the part that fills the panel; `fitWhole` instead
+// shows the whole picture with black bars.
 // With a valid `borderColor`, a solid frame is painted around the edge: in "picture" LED mode
 // the ring takes the colour of the picture's edge, so this sets the ring colour. Without a
 // picture, the frame goes around a black screen.
-QByteArray toPanelJpeg(const QString& path, const QString& borderColor = QString()) {
+struct PanelPicture {
+    QList<QByteArray> frames;
+    int loopMs = 0;
+};
+
+PanelPicture toPanelFrames(const QString& path, const QString& borderColor = QString(),
+                           const QRectF& crop = QRectF(), bool fitWhole = false) {
     QColor border(borderColor);
-    QImage img;
+    QList<QImage> images;
+    PanelPicture picture;
     if (!path.isEmpty()) {
-        img = QImage(path);
-        if (img.isNull()) return QByteArray();
-        img = img.convertToFormat(QImage::Format_RGB888)
-                 .scaled(480, 640, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-        img = img.copy((img.width() - 480) / 2, (img.height() - 640) / 2, 480, 640);
+        QImageReader reader(path);
+        QImage frame;
+        // The cooler's header holds at most 255 frames
+        while (images.size() < 255 && reader.read(&frame)) {
+            frame = frame.convertToFormat(QImage::Format_RGB888);
+            if (fitWhole) {
+                QImage panel(480, 640, QImage::Format_RGB888);
+                panel.fill(Qt::black);
+                QImage scaled = frame.scaled(480, 640, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                QPainter(&panel).drawImage((480 - scaled.width()) / 2, (640 - scaled.height()) / 2, scaled);
+                images.append(panel);
+            } else {
+                if (!crop.isNull()) {
+                    frame = frame.copy(QRectF(crop.x() * frame.width(), crop.y() * frame.height(),
+                                              crop.width() * frame.width(), crop.height() * frame.height())
+                                           .toRect());
+                }
+                frame = frame.scaled(480, 640, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                images.append(frame.copy((frame.width() - 480) / 2, (frame.height() - 640) / 2, 480, 640));
+            }
+            int delay = reader.nextImageDelay();
+            picture.loopMs += delay > 0 ? delay : 100;
+            if (!reader.supportsAnimation()) break;
+        }
+        if (images.isEmpty()) return PanelPicture();
+        if (images.size() == 1) picture.loopMs = 0;
     } else if (border.isValid()) {
-        img = QImage(480, 640, QImage::Format_RGB888);
+        QImage img(480, 640, QImage::Format_RGB888);
         img.fill(Qt::black);
+        images.append(img);
     } else {
-        return QByteArray();
+        return PanelPicture();
     }
-    if (border.isValid()) {
-        const int width = 24;
-        QPainter painter(&img);
-        painter.fillRect(0, 0, 480, width, border);
-        painter.fillRect(0, 640 - width, 480, width, border);
-        painter.fillRect(0, 0, width, 640, border);
-        painter.fillRect(480 - width, 0, width, 640, border);
+    for (QImage& img : images) {
+        if (border.isValid()) {
+            const int width = 24;
+            QPainter painter(&img);
+            painter.fillRect(0, 0, 480, width, border);
+            painter.fillRect(0, 640 - width, 480, width, border);
+            painter.fillRect(0, 0, width, 640, border);
+            painter.fillRect(480 - width, 0, width, 640, border);
+        }
+        QByteArray jpeg;
+        QBuffer buffer(&jpeg);
+        buffer.open(QIODevice::WriteOnly);
+        img.save(&buffer, "JPEG", 85);
+        picture.frames.append(jpeg);
     }
-    QByteArray jpeg;
-    QBuffer buffer(&jpeg);
-    buffer.open(QIODevice::WriteOnly);
-    img.save(&buffer, "JPEG", 85);
-    return jpeg;
+    return picture;
 }
 
 QString defaultStatusPath() {
@@ -864,8 +924,25 @@ int main(int argc, char *argv[])
     bool applied = false;
     Control current;
 
-    // Bring the device in line with `wanted`, touching only what changed
+    // Uploads rewrite the cooler's flash. Several in quick succession (e.g. while adjusting a
+    // crop) hung its firmware until a power cycle, so a new picture waits until the control
+    // file has been quiet for a moment and the previous upload is well behind us.
+    const qint64 kUploadSettleMs = 2000;
+    const qint64 kUploadGapMs = 20000;
+    QElapsedTimer uploadTimer;  // since the last upload attempt
+
+    // Bring the device in line with `wanted`, touching only what changed.
+    // Returns without applying anything while a picture upload has to wait.
     auto applyControl = [&](const Control& wanted) {
+        if (applied && wanted.screenMode == MODE_IMAGE && !wanted.samePicture(current)) {
+            qint64 settle = kUploadSettleMs - controlMtime.msecsTo(QDateTime::currentDateTime());
+            qint64 gap = uploadTimer.isValid() ? kUploadGapMs - uploadTimer.elapsed() : 0;
+            qint64 waitMs = qMax(settle, gap);
+            if (waitMs > 0) {
+                lastError = QString("Picture queued: uploading in %1 s").arg((waitMs + 999) / 1000);
+                return;
+            }
+        }
         lastError.clear();
         if (!applied || !wanted.sameDisplaySettings(current)) {
             if (!device.setDisplaySettings(toRotation(wanted.rotationDeg), wanted.led,
@@ -875,16 +952,26 @@ int main(int argc, char *argv[])
         }
         if (wanted.screenMode == MODE_IMAGE) {
             QString border = wanted.led == LED_IMAGE_EDGE ? wanted.ledColor : QString();
-            QByteArray jpeg = toPanelJpeg(wanted.imagePath, border);
-            if (jpeg.isEmpty()) {
+            PanelPicture picture = toPanelFrames(wanted.imagePath, border, wanted.crop, wanted.fitWhole);
+            if (picture.frames.isEmpty()) {
                 lastError = wanted.imagePath.isEmpty() ? "No picture selected"
                                                        : "Cannot read picture " + wanted.imagePath;
             } else {
-                QString hash = QCryptographicHash::hash(jpeg, QCryptographicHash::Md5).toHex();
+                QCryptographicHash md5(QCryptographicHash::Md5);
+                qint64 bytes = 0;
+                for (const QByteArray& jpeg : picture.frames) {
+                    md5.addData(jpeg);
+                    bytes += jpeg.size();
+                }
+                QString hash = md5.result().toHex();
                 if (hash != readFileText(uploadedHashPath)) {
-                    logInfo(QString("Uploading %1 (%2 KB)...")
-                        .arg(wanted.imagePath.isEmpty() ? "colour frame" : wanted.imagePath).arg(jpeg.size() / 1024));
-                    if (device.uploadImage(jpeg)) {
+                    logInfo(QString("Uploading %1 (%2 frame(s), %3 KB)...")
+                        .arg(wanted.imagePath.isEmpty() ? "colour frame" : wanted.imagePath)
+                        .arg(picture.frames.size()).arg(bytes / 1024));
+                    uploadTimer.restart();
+                    bool uploaded = device.uploadImage(picture.frames, picture.loopMs);
+                    uploadTimer.restart();
+                    if (uploaded) {
                         QDir().mkpath(QFileInfo(uploadedHashPath).path());
                         QSaveFile f(uploadedHashPath);
                         if (f.open(QIODevice::WriteOnly)) {
@@ -930,6 +1017,7 @@ int main(int argc, char *argv[])
     };
 
     applyControl(control);
+    Control desired = control;  // latest settings from the control file
     clockTimer.start();
 
     // Motherboard sensors for fan/pump RPM and voltages
@@ -972,10 +1060,11 @@ int main(int argc, char *argv[])
         QDateTime mtime = QFileInfo(controlPath).lastModified();
         if (mtime.isValid() && mtime != controlMtime) {
             controlMtime = mtime;
-            Control wanted = current;
-            if (loadControlFile(controlPath, wanted) && !(wanted == current)) {
-                applyControl(wanted);
-            }
+            loadControlFile(controlPath, desired);
+        }
+        // Retried every tick, so a queued picture upload goes out once it's allowed
+        if (!(desired == current)) {
+            applyControl(desired);
         }
 
         // Rotate built-in screens
@@ -1011,6 +1100,9 @@ int main(int argc, char *argv[])
             {"aux", kAuxAreas.key(current.aux)},
             {"cycle", current.cycleSeconds},
             {"image", current.imagePath},
+            {"fit", current.fitWhole ? "fit" : "fill"},
+            {"crop", current.crop.isNull() ? QJsonArray()
+                         : QJsonArray{current.crop.x(), current.crop.y(), current.crop.width(), current.crop.height()}},
             {"rotation", current.rotationDeg},
             {"cpuTemp", data.cpuTemp},
             {"cpuUsage", data.cpuUsage},
